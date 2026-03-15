@@ -365,9 +365,15 @@ def publish_from_worker(worker: Any) -> None:
     mx_server = os.environ.get("MODEL_EXPRESS_URL", "modelexpress-server:8001")
 
     param_tensors = {}
+    seen_data_ptrs = set()
     total_bytes = 0
     for name, param in torch_model.named_parameters():
         if param.device.type == "cuda" and param.device.index == device_id:
+            ptr = param.data.data_ptr()
+            if ptr in seen_data_ptrs:
+                logger.debug("Skipping aliased param: %s (ptr=%x)", name, ptr)
+                continue
+            seen_data_ptrs.add(ptr)
             param_tensors[name] = param.data
             total_bytes += param.numel() * param.element_size()
 
@@ -596,8 +602,37 @@ class MxLiveWeightLoader:
 
         nixl_mgr.shutdown()
 
-        # 8. Return empty dict — weights are already in model params
-        return {}
+        # 8. Load any size-mismatched tensors from PVC checkpoint as fallback
+        fallback_weights = {}
+        size_mismatched = [
+            src_name for src_name, src_desc in source_descs.items()
+            if src_name in target_params
+            and src_desc.size != target_params[src_name].numel() * target_params[src_name].element_size()
+        ]
+        if size_mismatched:
+            logger.info(
+                "Loading %d size-mismatched tensors from PVC fallback: %s...",
+                len(size_mismatched), size_mismatched[:3],
+            )
+            try:
+                from safetensors import safe_open
+                import glob as _glob
+                safetensor_files = sorted(_glob.glob(os.path.join(checkpoint_dir, "*.safetensors")))
+                for sf_path in safetensor_files:
+                    with safe_open(sf_path, framework="pt", device=f"cuda:{device_id}") as f:
+                        for key in f.keys():
+                            if key in size_mismatched:
+                                fallback_weights[key] = f.get_tensor(key)
+                                size_mismatched.remove(key)
+                    if not size_mismatched:
+                        break
+                if size_mismatched:
+                    logger.warning("Still missing after PVC fallback: %s", size_mismatched)
+            except Exception as e:
+                logger.warning("PVC fallback failed: %s", e)
+
+        # Return fallback weights for TRT-LLM to apply; P2P weights are already in model params
+        return fallback_weights
 
     def cleanup(self):
         pass

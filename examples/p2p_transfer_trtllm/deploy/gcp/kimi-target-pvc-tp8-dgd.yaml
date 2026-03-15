@@ -1,20 +1,12 @@
-# Kimi K2.5 decode source — DGD with multinode TP=8 (2 nodes × 4 GPUs)
-# Publishes weights via NIXL to modelexpress-server-decode
-# Phase 2: provides TP=8 weights for decode targets
-# Namespace: kavin
-#
-# Prerequisites:
-#   - modelexpress-server-decode + redis-decode running (mx-infra-decode.yaml)
-#   - shared-model-cache PVC with Kimi model
-#   - Dynamo platform (etcd + NATS)
-#   - DGD operator webhook running
+# Kimi K2.5 aggregated TP=8 — loads from PVC (no MX P2P)
+# Baseline to verify engine config produces correct output
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: kimi-source-decode-trtllm-config
+  name: kimi-target-pvc-tp8-config
 data:
-  source-decode.yaml: |
+  aggregated.yaml: |
     max_num_tokens: 8192
     enable_chunked_prefill: true
     disable_overlap_scheduler: true
@@ -44,15 +36,78 @@ data:
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: kimi-source-decode
+  name: kimi-target-pvc-tp8
 spec:
   services:
-    source:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        hostNetwork: true
+        dnsPolicy: ClusterFirstWithHostNet
+        containers: null
+        imagePullSecrets:
+          - name: nvcr-imagepullsecret
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/kavink:dynamo-trtllm-mx-v1.7.2
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.frontend
+            - --http-port
+            - "8000"
+            - --request-plane
+            - nats
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: NATS_SERVER
+              value: "nats://dynamo-platform-nats.kavin.svc.cluster.local:4222"
+            - name: ETCD_ENDPOINTS
+              value: "dynamo-platform-etcd.kavin.svc.cluster.local:2379"
+            - name: HF_HOME
+              value: /model-cache
+          volumeMounts:
+            - mountPath: /model-cache
+              name: model-cache
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+          - effect: NoSchedule
+            key: dedicated
+            operator: Equal
+            value: user-workload
+          - effect: NoExecute
+            key: dedicated
+            operator: Equal
+            value: user-workload
+          - effect: NoSchedule
+            key: nvidia.com/gpu
+            operator: Exists
+          - effect: NoSchedule
+            key: kubernetes.io/arch
+            operator: Exists
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: shared-model-cache
+    worker:
       componentType: worker
+      subComponentType: decode
       envFromSecret: hf-token-secret
       multinode:
         nodeCount: 2
       replicas: 1
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 9090
+        periodSeconds: 10
+        timeoutSeconds: 30
+        failureThreshold: 60
       resources:
         limits:
           gpu: "4"
@@ -62,6 +117,7 @@ spec:
         hostNetwork: true
         dnsPolicy: ClusterFirstWithHostNet
         securityContext: {}
+        terminationGracePeriodSeconds: 600
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -70,7 +126,6 @@ spec:
                 - key: cloud.google.com/gke-nodepool
                   operator: In
                   values:
-                  - customer-gpu-w0e
                   - customer-gpu-o7v
           podAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -79,13 +134,13 @@ spec:
                 - key: app.kubernetes.io/part-of
                   operator: In
                   values:
-                  - kimi-source-decode
+                  - kimi-target-pvc-tp8
               topologyKey: nvidia.com/gpu.clique
         containers: null
         imagePullSecrets:
           - name: nvcr-imagepullsecret
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/kavink:dynamo-trtllm-mx-v1.7.3
+          image: nvcr.io/nvidian/dynamo-dev/kavink:dynamo-trtllm-mx-v1.7.2
           imagePullPolicy: Always
           workingDir: /workspace/
           securityContext:
@@ -100,13 +155,12 @@ spec:
             - --served-model-name
             - baseten-admin/Kimi-2.5-text-nvfp4-v3
             - --extra-engine-args
-            - /config/source-decode.yaml
-            - --model-express-url
-            - modelexpress-server-decode.kavin.svc.cluster.local:8001
-            - --model-express-role
-            - source
+            - /config/aggregated.yaml
             - --tensor-parallel-size
             - "8"
+            - --publish-events-and-metrics
+            - --request-plane
+            - nats
           env:
             - name: POD_UID
               valueFrom:
@@ -116,12 +170,8 @@ spec:
               value: "nats://dynamo-platform-nats.kavin.svc.cluster.local:4222"
             - name: ETCD_ENDPOINTS
               value: "dynamo-platform-etcd.kavin.svc.cluster.local:2379"
-            - name: MODEL_EXPRESS_URL
-              value: "modelexpress-server-decode.kavin.svc.cluster.local:8001"
             - name: MODEL_NAME
               value: "baseten-admin/Kimi-2.5-text-nvfp4-v3"
-            - name: MODEL_EXPRESS_SOURCE
-              value: "1"
             - name: WORLD_SIZE
               value: "8"
             - name: HOME
@@ -133,15 +183,7 @@ spec:
             - name: HF_MODULES_CACHE
               value: /tmp/hf_modules
             - name: TRITON_CACHE_DIR
-              value: /model-cache/.triton-cache
-            - name: NIXL_LOG_LEVEL
-              value: "INFO"
-            - name: TRTLLM_UCX_INTERFACE
-              value: "eth0"
-            - name: UCX_TLS
-              value: "self,sm,rc,cuda_copy,gdr_copy,tcp"
-            - name: UCX_IB_GID_INDEX
-              value: "3"
+              value: /tmp/.triton-cache
             - name: OMPI_MCA_pml
               value: "ob1"
             - name: OMPI_MCA_btl
@@ -150,8 +192,6 @@ spec:
               value: "eth0"
             - name: OMPI_MCA_oob_tcp_if_include
               value: "eth0"
-            - name: NCCL_NET_PLUGIN
-              value: "none"
             - name: NCCL_CUMEM_ENABLE
               value: "1"
             - name: NCCL_NVLS_ENABLE
@@ -176,6 +216,8 @@ spec:
               value: "0"
             - name: NCCL_MAX_NCHANNELS
               value: "2"
+            - name: TRTLLM_FORCE_COMM_METHOD
+              value: NVLINK_TWO_SIDED
             - name: ENABLE_CONFIGURABLE_MOE
               value: "1"
             - name: TLLM_LOG_LEVEL
@@ -220,4 +262,4 @@ spec:
               claimName: shared-model-cache
           - name: trtllm-config
             configMap:
-              name: kimi-source-decode-trtllm-config
+              name: kimi-target-pvc-tp8-config

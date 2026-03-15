@@ -40,6 +40,61 @@ metadata:
   name: kimi-target-agg-tp8
 spec:
   services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        hostNetwork: true
+        dnsPolicy: ClusterFirstWithHostNet
+        containers: null
+        imagePullSecrets:
+          - name: nvcr-imagepullsecret
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/kavink:dynamo-trtllm-mx-v1.7.3
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.frontend
+            - --http-port
+            - "8000"
+            - --request-plane
+            - nats
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: NATS_SERVER
+              value: "nats://dynamo-platform-nats.kavin.svc.cluster.local:4222"
+            - name: ETCD_ENDPOINTS
+              value: "dynamo-platform-etcd.kavin.svc.cluster.local:2379"
+            - name: HF_HOME
+              value: /model-cache
+          volumeMounts:
+            - mountPath: /model-cache
+              name: model-cache
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+          - effect: NoSchedule
+            key: dedicated
+            operator: Equal
+            value: user-workload
+          - effect: NoExecute
+            key: dedicated
+            operator: Equal
+            value: user-workload
+          - effect: NoSchedule
+            key: nvidia.com/gpu
+            operator: Exists
+          - effect: NoSchedule
+            key: kubernetes.io/arch
+            operator: Exists
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: shared-model-cache
     target:
       componentType: worker
       subComponentType: decode
@@ -86,7 +141,7 @@ spec:
         imagePullSecrets:
           - name: nvcr-imagepullsecret
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/kavink:dynamo-trtllm-mx-v1.7.2
+          image: nvcr.io/nvidian/dynamo-dev/kavink:dynamo-trtllm-mx-v1.7.3
           imagePullPolicy: Always
           workingDir: /workspace/
           securityContext:
