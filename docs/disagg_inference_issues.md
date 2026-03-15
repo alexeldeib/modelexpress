@@ -379,7 +379,10 @@ When target pods try to `add_remote_agent(source_metadata)`, NIXL/UCX attempts t
 8. `MX_TRANSFER_TIMEOUT` env var added (default 900s) — TCP transfers of 90 GB can exceed the old 300s hardcoded timeout
 
 ### Issue #8: RoCE not activating despite correct config
-**Status**: INVESTIGATING
+**Status**: RESOLVED — UCX_IB_GID_INDEX=3 was the missing piece
+
+**Fix**: `UCX_TLS=self,sm,rc,cuda_copy,gdr_copy,tcp` + `UCX_IB_GID_INDEX=3` + `TRTLLM_UCX_INTERFACE=eth0`
+**Result**: 360-430 Gbps RoCE across all 8 ranks (90.75 GB in 1.69-2.02s per rank)
 
 UCX selects TCP even with all correct config:
 - `privileged: true`, `ulimit -l unlimited`
