@@ -1,11 +1,8 @@
 """Patch model_loader.py for PRESHARDED P2P RDMA weight loading.
 
-Two patches:
-1. Skip model.load_weights({}) when PRESHARDED returns empty dict,
-   and set _mx_p2p_weights_loaded flag on model
-2. Skip module-level post_load_weights() when flag is set (P2P target),
-   but keep model-level post_load_weights for alias setup.
-   Source still gets full post_load_weights pipeline.
+Two patches on the SECOND PRESHARDED block (the one that actually runs):
+1. Skip model.load_weights({}) when empty + set _mx_p2p_weights_loaded flag
+2. Conditional post_load_weights based on flag
 """
 import os
 
@@ -14,13 +11,26 @@ target = "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/pyex
 with open(target) as f:
     content = f.read()
 
-# Patch 1: Skip model.load_weights({}) for PRESHARDED + set flag
-old1 = """                self.weight_mapper = checkpoint_loader.get_initialized_weight_mapper(
-                    model, config)
-                self._call_load_weights(model.load_weights, weights,
-                                        self.weight_mapper)"""
+# Patch 1: The SECOND PRESHARDED block (with tp_size check)
+old1 = """            elif load_format == LoadFormat.PRESHARDED:
+                for module in model.modules():
+                    if hasattr(module, 'tp_size'):
+                        module._weights_presharded = True
+                weights = checkpoint_loader.load_weights(
+                    checkpoint_dir, mapping=self.mapping, model=model)
+                if weights:
+                    self.weight_mapper = checkpoint_loader.get_initialized_weight_mapper(
+                        model, config)
+                    self._call_load_weights(model.load_weights, weights,
+                                            self.weight_mapper)"""
 
-new1 = """                if weights:
+new1 = """            elif load_format == LoadFormat.PRESHARDED:
+                for module in model.modules():
+                    if hasattr(module, 'tp_size'):
+                        module._weights_presharded = True
+                weights = checkpoint_loader.load_weights(
+                    checkpoint_dir, mapping=self.mapping, model=model)
+                if weights:
                     self.weight_mapper = checkpoint_loader.get_initialized_weight_mapper(
                         model, config)
                     self._call_load_weights(model.load_weights, weights,
@@ -31,13 +41,13 @@ new1 = """                if weights:
 
 if old1 in content:
     content = content.replace(old1, new1)
-    print("patch_model_loader: patch 1 (skip load_weights + set flag) applied")
-elif "PRESHARDED: weights injected directly" in content:
-    print("patch_model_loader: patch 1 already applied")
+    print("patch_model_loader: patch 1 (PRESHARDED skip + flag) applied")
+elif "_mx_p2p_weights_loaded" in content and "elif load_format == LoadFormat.PRESHARDED" in content:
+    print("patch_model_loader: patch 1 may already be applied")
 else:
     print("patch_model_loader: WARNING — patch 1 target not found")
 
-# Patch 2: Conditional post_load_weights based on P2P flag
+# Patch 2: Conditional post_load_weights
 old2 = """            for module in model.modules():
                 if hasattr(module, 'post_load_weights') and not getattr(
                         module, '_weights_removed', False):
@@ -60,6 +70,18 @@ elif "PRESHARDED P2P: skipping module post_load_weights" in content:
     print("patch_model_loader: patch 2 already applied")
 else:
     print("patch_model_loader: WARNING — patch 2 target not found")
+
+# Also clean up the misapplied patch in the AUTO block
+bad_patch = """                else:
+                    model._mx_p2p_weights_loaded = True
+                    logger.info("PRESHARDED: weights injected directly, skipping load_weights()")
+
+                if self.spec_config"""
+good_patch = """
+                if self.spec_config"""
+if bad_patch in content:
+    content = content.replace(bad_patch, good_patch)
+    print("patch_model_loader: cleaned up misapplied AUTO block patch")
 
 with open(target, "w") as f:
     f.write(content)
