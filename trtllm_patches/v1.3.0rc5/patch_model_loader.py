@@ -71,18 +71,6 @@ elif "PRESHARDED P2P: skipping module post_load_weights" in content:
 else:
     print("patch_model_loader: WARNING — patch 2 target not found")
 
-# Also clean up the misapplied patch in the AUTO block
-bad_patch = """                else:
-                    model._mx_p2p_weights_loaded = True
-                    logger.info("PRESHARDED: weights injected directly, skipping load_weights()")
-
-                if self.spec_config"""
-good_patch = """
-                if self.spec_config"""
-if bad_patch in content:
-    content = content.replace(bad_patch, good_patch)
-    print("patch_model_loader: cleaned up misapplied AUTO block patch")
-
 with open(target, "w") as f:
     f.write(content)
 print("patch_model_loader: done")
