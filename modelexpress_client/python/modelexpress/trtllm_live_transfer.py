@@ -386,6 +386,18 @@ def publish_from_worker(worker: Any) -> None:
         model_name, mpi_rank, device_id, len(param_tensors), total_bytes / 1e9,
     )
 
+    # Diagnostic: checksum first few params for comparison with target
+    count = 0
+    for name, tensor in list(param_tensors.items())[:5]:
+        val = tensor.to(torch.float32)
+        cksum = val.sum().item()
+        nonzero = (tensor != 0).sum().item()
+        logger.info(
+            "SOURCE CHECKSUM rank %d: %s shape=%s dtype=%s sum=%.4f nonzero=%d/%d",
+            mpi_rank, name, list(tensor.shape), tensor.dtype,
+            cksum, nonzero, tensor.numel(),
+        )
+
     nixl_mgr = NixlTransferManager(
         agent_name=f"trtllm-live-source-rank{mpi_rank}-{os.getpid()}",
         device_id=device_id,
@@ -622,6 +634,18 @@ class MxLiveWeightLoader:
             "Rank %d: transferred %d params (%.2f GB) in %.2fs (%.1f Gbps) — DIRECT into model params",
             mpi_rank, n_tensors, bytes_transferred / 1e9, elapsed, bw,
         )
+
+        # Diagnostic: checksum first few params to verify RDMA data
+        torch.cuda.synchronize(device_id)
+        for name, _, dst_param in matched[:5]:
+            val = dst_param.to(torch.float32)
+            cksum = val.sum().item()
+            nonzero = (dst_param != 0).sum().item()
+            logger.info(
+                "CHECKSUM rank %d: %s shape=%s dtype=%s sum=%.4f nonzero=%d/%d",
+                mpi_rank, name, list(dst_param.shape), dst_param.dtype,
+                cksum, nonzero, dst_param.numel(),
+            )
 
         # 7.5. Apply dtype casts for mismatched tensors
         for src_name, (buf, dst_param) in cast_buffers.items():
