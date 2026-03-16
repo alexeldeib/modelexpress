@@ -60,15 +60,16 @@ RUN python3 /tmp/apply_patches.py && rm /tmp/apply_patches.py
 COPY trtllm_patches/v1.3.0rc5/patch_tp_allgather.py /tmp/patch_tp_allgather.py
 RUN python3 /tmp/patch_tp_allgather.py && rm /tmp/patch_tp_allgather.py
 
-# Patch model_loader to skip model.load_weights() when PRESHARDED returns empty dict
+# Patch model_loader: source publishes BEFORE post_load_weights, target runs full post_load_weights
 COPY trtllm_patches/v1.3.0rc5/patch_model_loader.py /tmp/patch_model_loader.py
 RUN python3 /tmp/patch_model_loader.py && rm /tmp/patch_model_loader.py
 
 # Verify installation (can't import full TRT-LLM at build time — no GPU)
 RUN python3 -c "from modelexpress.client import MxClient; print('ModelExpress client OK')" && \
+    python3 -c "from modelexpress.trtllm_live_transfer import publish_model_params; print('publish_model_params OK')" && \
     grep -q "PRESHARDED" /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/llmapi/llm_args.py && \
     echo "LoadFormat.PRESHARDED OK" && \
-    grep -q "publish_from_worker" /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/executor/worker.py && \
-    echo "worker.py publish_from_worker hook OK" && \
+    grep -q "publish_model_params" /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/pyexecutor/model_loader.py && \
+    echo "model_loader.py source publish hook OK" && \
     grep -q "MODEL_EXPRESS_SOURCE" /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/engine.py && \
     echo "engine.py MODEL_EXPRESS_SOURCE OK"

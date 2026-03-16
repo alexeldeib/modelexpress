@@ -50,7 +50,7 @@ spec:
         imagePullSecrets:
           - name: nvcr-imagepullsecret
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/kavink:dynamo-trtllm-mx-v1.7.12
+          image: nvcr.io/nvidian/dynamo-dev/kavink:dynamo-trtllm-mx-v1.8.0
           command:
             - python3
           args:
@@ -128,20 +128,11 @@ spec:
                   operator: In
                   values:
                   - customer-gpu-o7v
-          podAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                - key: app.kubernetes.io/part-of
-                  operator: In
-                  values:
-                  - kimi-target-agg-tp8
-              topologyKey: nvidia.com/gpu.clique
         containers: null
         imagePullSecrets:
           - name: nvcr-imagepullsecret
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/kavink:dynamo-trtllm-mx-v1.7.12
+          image: nvcr.io/nvidian/dynamo-dev/kavink:dynamo-trtllm-mx-v1.8.0
           imagePullPolicy: Always
           workingDir: /workspace/
           securityContext:

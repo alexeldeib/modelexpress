@@ -37,50 +37,112 @@ and same source weights. This confirms the weights are correct for TP=4.
 decode source publishes 8 workers × 90.75 GB each. The TP=8 decode target receives
 all 8 shards correctly via NIXL RDMA at 365-376 Gbps.
 
-### Investigation plan for garbage output
+### Root Cause Analysis (updated 2026-03-16)
 
-Two potential root causes:
+**Status**: RoCE P2P validated at 363-479 Gbps. Checksums match between source and
+target. Aggregated TP=8 target inference still produces garbage output ("0000 a00...").
 
-**Hypothesis A: Weight transfer correctness (TP=8)**
+**Disproven hypotheses**:
+- ~~Weight corruption during RDMA~~: Checksums are byte-identical (verified via sum + nonzero)
+- ~~MoE backend mismatch~~: Both source and target use `TRTLLM` backend
+- ~~`model.load_weights({})` overwriting RDMA data~~: Patched to skip when empty dict
+- ~~`post_load_weights()` recomputing quant scales~~: Patched to skip entirely for P2P
 
-The TP=8 weights may not be loaded correctly into the decode model, even though
-the transfer completes without errors. Possible issues:
-- Source publishes weights with `worker_rank` based on MPI rank, but target model
-  assigns parameters to local GPU indices differently in multinode
-- Weight tensor names match (same model) but the TP sharding layout at EP=8 might
-  differ from EP=4 in ways that affect MoE expert assignment
-- The source loaded from disk at TP=8, but TRT-LLM's weight sharding for EP=8
-  may produce different parameter layouts than simply splitting EP=4 shards
+**True root cause: Skipping module-level `post_load_weights()` drops critical transforms**
 
-**How to verify**:
-1. Run TP=8 aggregated inference (non-disagg) — deploy a standalone TP=8 target
-   with a frontend, verify output is coherent. If garbage, the TP=8 weights are wrong.
-2. Compare parameter checksums between source and target for each rank
-3. Run disagg with same TP (TP=8 prefill + TP=8 decode) to isolate mixed TP from
-   the KV cache question
+Deep analysis of TRT-LLM codebase (`tensorrt_llm/_torch/`) reveals that the current
+approach — transferring the source's FINAL parameter state and skipping all module
+`post_load_weights()` — is **fundamentally flawed**. The problem is NOT that
+`post_load_weights` corrupts data; it's that certain modules create NEW parameter
+tensors (allocating fresh `nn.Parameter` objects), which means the P2P-written data
+is in the OLD tensor that gets replaced.
 
-**Hypothesis B: KV cache format mismatch between TP=4 prefill and TP=8 decode**
+#### Key `post_load_weights()` transforms we're skipping:
 
-The KV cache produced by TP=4 prefill (EP=4) may be incompatible with TP=8 decode (EP=8).
-With `enable_attention_dp: true`, each rank computes attention independently (full heads),
-so KV cache format should be TP-independent. However:
-- The number of attention DP ranks differs (4 vs 8), so KV cache is distributed
-  across different rank counts — the NIXL KV transceiver needs to map 4 KV shards to 8 decode ranks
-- The `kv_block_size` and `tokens_per_block` settings must match between prefill and decode
-- Karen's mixed TP recipe uses the same clique affinity — both prefill and decode share
-  the NVLink domain, which may affect how NIXL KV transfer maps ranks
+| Module | File | What it does | Impact of skipping |
+|--------|------|-------------|-------------------|
+| **NVFP4 Linear** | `linear.py:1545` | Pads weight/scale for GEMM alignment (32×16), allocates NEW Parameter | Target uses unpadded buffers with P2P data, but shapes may be misaligned for GEMM kernels |
+| **FP8 Linear** | `linear.py:1184` | `resmooth_to_fp8_e8m0()` + `transform_sf_into_required_layout()`, allocates NEW scale Parameter | Scale layout wrong for TMA on SM100/SM120 |
+| **DeepSeekV3 Attention** | `modeling_deepseekv3.py:812` | Copies `indexer.wk` into fused `kv_a_proj_with_mqa`, sets `indexer.wk = None` | P2P transfers fused weight correctly, but `indexer.wk` remains non-None on target |
+| **FP8 MoE** | `quantization.py:1112` | Resmooths FP8 to E8M0 for all experts, allocates NEW weight/scale Parameters | Expert weights in wrong FP8 variant |
+| **FP8 MoE** | `quantization.py:873` | Pads w3_w1/w2 for CUTLASS alignment (32×16) | Misaligned for CUTLASS kernels |
+| **MoE shared experts** | `quantization.py:497` | `setup_quant_scales()`, finalize shared expert weight distribution | Quant scales never set up |
 
-**How to verify**:
-1. Run disagg with same TP=8 for both prefill and decode — if output is coherent,
-   the KV cache format is the issue when TP differs
-2. Check TRT-LLM docs/code for mixed EP support with NIXL KV transceiver
-3. Ask TRT-LLM team if `enable_attention_dp: true` guarantees KV cache compatibility
-   across different EP sizes
+#### The Parameter replacement problem:
 
-### Priority
-1. Test TP=8 aggregated inference first (verifies weight correctness)
-2. If weights are correct, test same-TP disagg (TP=8+TP=8) to isolate KV cache
-3. If KV cache is the issue, align prefill and decode to same TP or ask TRT-LLM team
+Several `post_load_weights()` implementations do this pattern:
+```python
+module.weight = Parameter(F.pad(module.weight, ...), requires_grad=False)
+module.weight_scale = Parameter(transform(module.weight_scale), ...)
+```
+
+This creates a **new** `nn.Parameter` tensor and assigns it to the module. The old
+tensor (which P2P wrote data into) is orphaned. Even if we ran `post_load_weights()`,
+it would process the P2P-transferred data — but the key issue is that these
+transforms MUST run because the GEMM kernels expect the transformed layout.
+
+#### Why skipping doesn't work:
+
+Our current approach: "source runs all transforms → P2P final state → target skips transforms"
+
+This fails because:
+1. Source's `post_load_weights` allocates NEW padded parameters (e.g., 4128×3584 instead of 4096×3584)
+2. Target's meta init creates UNPADDED parameters (4096×3584)
+3. P2P matches by name — if source tensor is LARGER than target tensor, they go into
+   "size mismatch" and are skipped (logged as warning, but we missed it in the noise)
+4. Even for tensors that match size, the scale layout transforms (interleave, resmooth)
+   mean the source's scale data is in the FINAL kernel-expected format, but the target
+   buffers were never allocated with the right shape
+
+### Fix Strategy
+
+**Option 1: RUN `post_load_weights()` on P2P target (recommended)**
+
+Instead of skipping module post_load_weights, we should:
+1. Transfer weights from source BEFORE post_load_weights runs (i.e., transfer the
+   raw checkpoint-loaded state, not the final kernel-ready state)
+2. OR: Transfer the final state AND also run post_load_weights on target
+
+Option 1a — "Transfer pre-processed weights":
+- Source: after `model.load_weights()` but BEFORE `post_load_weights()`, publish params
+- Target: receive via P2P into unpadded buffers, then run full `post_load_weights()`
+- Pro: Clean separation, no format mismatch
+- Con: Requires source to publish at a different point in the loading pipeline
+
+Option 1b — "Let post_load_weights run on P2P data":
+- Remove the `_mx_p2p_weights_loaded` check so module post_load_weights DOES run
+- This means P2P transfers raw (pre-transform) data, and target processes it normally
+- Pro: Simplest change — just remove our patches
+- Con: Requires understanding which transforms are idempotent vs. destructive
+
+**Option 2: Match source parameter shapes exactly**
+
+- After model init on target but BEFORE P2P, run a "dry run" of post_load_weights
+  to get the final parameter shapes (with padding)
+- Reallocate target parameters to match source shapes
+- Transfer via P2P
+- Skip post_load_weights since data is already in final form
+- Pro: True zero-transform P2P
+- Con: Complex, fragile, tightly coupled to TRT-LLM internals
+
+**Option 3 (simplest): Use source's `load_weights()` format**
+
+- Source publishes weights from AFTER `load_weights()` but BEFORE `post_load_weights()`
+- On source side, hook into the model loader between lines 394 and 471 of model_loader.py
+- Target receives pre-transform weights, then runs normal `post_load_weights()`
+- This is the cleanest approach and avoids ALL format mismatch issues
+
+### Immediate next step
+
+Test **Option 1b** first (remove the skip): In `model_loader.py`, remove the
+`_mx_p2p_weights_loaded` conditional so target runs all module `post_load_weights()`.
+The P2P data will be processed by the same transforms that would run on PVC-loaded data.
+If NVFP4 padding produces the wrong result because P2P data is already padded, we'll
+see it. If the dimensions happen to match (Kimi K2.5 may have aligned dimensions),
+this could "just work".
+
+If Option 1b fails, implement **Option 3**: change publish point to AFTER load_weights
+but BEFORE post_load_weights.
 
 ---
 

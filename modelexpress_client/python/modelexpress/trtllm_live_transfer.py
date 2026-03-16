@@ -319,6 +319,111 @@ class MxLiveSource:
         self._nixl_managers.clear()
 
 
+def publish_model_params(torch_model: Any) -> None:
+    """Publish this rank's model params to ModelExpress directly from a torch model.
+
+    Called from ModelLoader.load() BEFORE post_load_weights() so that targets
+    receive pre-processed weights and can run their own post_load_weights().
+    """
+    from .nixl_transfer import NixlTransferManager
+    from . import p2p_pb2, p2p_pb2_grpc
+    import grpc
+
+    if not hasattr(torch_model, "named_parameters"):
+        logger.warning("publish_model_params: model has no named_parameters")
+        return
+
+    device_id = torch.cuda.current_device()
+    try:
+        from mpi4py import MPI
+        mpi_rank = MPI.COMM_WORLD.Get_rank()
+    except Exception:
+        mpi_rank = device_id
+
+    model_name = os.environ.get("MODEL_NAME", "unknown")
+    mx_server = os.environ.get("MODEL_EXPRESS_URL", "modelexpress-server:8001")
+
+    param_tensors = {}
+    seen_data_ptrs = set()
+    total_bytes = 0
+    for name, param in torch_model.named_parameters():
+        if param.device.type == "cuda" and param.device.index == device_id:
+            ptr = param.data.data_ptr()
+            if ptr in seen_data_ptrs:
+                logger.debug("Skipping aliased param: %s (ptr=%x)", name, ptr)
+                continue
+            seen_data_ptrs.add(ptr)
+            param_tensors[name] = param.data
+            total_bytes += param.numel() * param.element_size()
+
+    if not param_tensors:
+        logger.warning("publish_model_params: no params on device %d (rank %d)", device_id, mpi_rank)
+        return
+
+    logger.info(
+        "ModelExpress publish_model_params: '%s' rank %d (GPU %d), %d params, %.2f GB (PRE post_load_weights)",
+        model_name, mpi_rank, device_id, len(param_tensors), total_bytes / 1e9,
+    )
+
+    nixl_mgr = NixlTransferManager(
+        agent_name=f"trtllm-live-source-rank{mpi_rank}-{os.getpid()}",
+        device_id=device_id,
+    )
+    nixl_mgr.initialize()
+    nixl_mgr.register_tensors(param_tensors)
+
+    # Store NIXL manager on model so it persists (prevents GC of registered buffers)
+    if not hasattr(torch_model, '_mx_nixl_managers'):
+        torch_model._mx_nixl_managers = []
+    torch_model._mx_nixl_managers.append(nixl_mgr)
+
+    tensor_protos = []
+    for name, tensor in param_tensors.items():
+        tensor_protos.append(p2p_pb2.TensorDescriptor(
+            name=name,
+            addr=tensor.data_ptr(),
+            size=tensor.numel() * tensor.element_size(),
+            device_id=device_id,
+            dtype=str(tensor.dtype),
+        ))
+
+    my_worker = p2p_pb2.WorkerMetadata(
+        worker_rank=mpi_rank,
+        nixl_metadata=nixl_mgr.nixl_metadata,
+        tensors=tensor_protos,
+    )
+
+    from mpi4py import MPI
+    comm = MPI.COMM_WORLD
+    my_worker_bytes = my_worker.SerializeToString()
+    all_worker_bytes = comm.gather(my_worker_bytes, root=0)
+
+    if comm.Get_rank() == 0:
+        all_workers = []
+        for wb in all_worker_bytes:
+            w = p2p_pb2.WorkerMetadata()
+            w.ParseFromString(wb)
+            all_workers.append(w)
+            logger.info("  Gathered rank %d: %d tensors", w.worker_rank, len(w.tensors))
+
+        options = [
+            ("grpc.max_send_message_length", 200 * 1024 * 1024),
+            ("grpc.max_receive_message_length", 200 * 1024 * 1024),
+        ]
+        channel = grpc.insecure_channel(mx_server, options=options)
+        stub = p2p_pb2_grpc.P2pServiceStub(channel)
+        request = p2p_pb2.PublishMetadataRequest(model_name=model_name, workers=all_workers)
+        response = stub.PublishMetadata(request)
+        channel.close()
+
+        if not response.success:
+            raise RuntimeError(f"ModelExpress publish_model_params failed: {response.message}")
+        logger.info("ModelExpress: published ALL %d workers (pre post_load_weights)", len(all_workers))
+
+    comm.Barrier()
+    logger.info("ModelExpress worker rank %d (GPU %d) published %.2f GB", mpi_rank, device_id, total_bytes / 1e9)
+
+
 def publish_from_worker(worker: Any) -> None:
     """Publish this rank's model params to ModelExpress from inside a TRT-LLM executor worker.
 
