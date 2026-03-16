@@ -1,7 +1,8 @@
-"""Patch model_loader.py for PRESHARDED P2P RDMA weight loading.
+"""Patch model_loader.py for PRESHARDED P2P — add flag + conditional post_load_weights.
 
-Two patches on the SECOND PRESHARDED block (the one that actually runs):
-1. Skip model.load_weights({}) when empty + set _mx_p2p_weights_loaded flag
+apply_patches.py already adds the PRESHARDED block with load_weights skip.
+This patch adds:
+1. _mx_p2p_weights_loaded flag in the existing else branch
 2. Conditional post_load_weights based on flag
 """
 import os
@@ -11,43 +12,23 @@ target = "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/pyex
 with open(target) as f:
     content = f.read()
 
-# Patch 1: The SECOND PRESHARDED block (with tp_size check)
-old1 = """            elif load_format == LoadFormat.PRESHARDED:
-                for module in model.modules():
-                    if hasattr(module, 'tp_size'):
-                        module._weights_presharded = True
-                weights = checkpoint_loader.load_weights(
-                    checkpoint_dir, mapping=self.mapping, model=model)
-                if weights:
-                    self.weight_mapper = checkpoint_loader.get_initialized_weight_mapper(
-                        model, config)
-                    self._call_load_weights(model.load_weights, weights,
-                                            self.weight_mapper)"""
+# Patch 1: Add flag to existing PRESHARDED else branch (created by apply_patches.py)
+old1 = '''                else:
+                    logger.info("PRESHARDED: weights injected directly, skipping load_weights()")'''
 
-new1 = """            elif load_format == LoadFormat.PRESHARDED:
-                for module in model.modules():
-                    if hasattr(module, 'tp_size'):
-                        module._weights_presharded = True
-                weights = checkpoint_loader.load_weights(
-                    checkpoint_dir, mapping=self.mapping, model=model)
-                if weights:
-                    self.weight_mapper = checkpoint_loader.get_initialized_weight_mapper(
-                        model, config)
-                    self._call_load_weights(model.load_weights, weights,
-                                            self.weight_mapper)
-                else:
+new1 = '''                else:
                     model._mx_p2p_weights_loaded = True
-                    logger.info("PRESHARDED: weights injected directly, skipping load_weights()")"""
+                    logger.info("PRESHARDED: weights injected directly, skipping load_weights()")'''
 
-if old1 in content:
+if old1 in content and "_mx_p2p_weights_loaded" not in content:
     content = content.replace(old1, new1)
-    print("patch_model_loader: patch 1 (PRESHARDED skip + flag) applied")
-elif "_mx_p2p_weights_loaded" in content and "elif load_format == LoadFormat.PRESHARDED" in content:
-    print("patch_model_loader: patch 1 may already be applied")
+    print("patch_model_loader: patch 1 (add flag to existing else) applied")
+elif "_mx_p2p_weights_loaded" in content:
+    print("patch_model_loader: patch 1 already applied")
 else:
     print("patch_model_loader: WARNING — patch 1 target not found")
 
-# Patch 2: Conditional post_load_weights
+# Patch 2: Conditional post_load_weights based on P2P flag
 old2 = """            for module in model.modules():
                 if hasattr(module, 'post_load_weights') and not getattr(
                         module, '_weights_removed', False):
