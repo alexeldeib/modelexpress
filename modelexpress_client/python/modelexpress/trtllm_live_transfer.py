@@ -532,6 +532,7 @@ class MxLiveWeightLoader:
 
         # 4. Match source and target by name
         matched = []
+        dtype_cast_needed = []
         unmatched_source = []
         for src_name, src_desc in source_descs.items():
             if src_name in target_params:
@@ -541,10 +542,21 @@ class MxLiveWeightLoader:
                 if src_size == dst_size:
                     matched.append((src_name, src_desc, dst_param))
                 else:
-                    logger.warning(
-                        "Size mismatch for %s: source=%d target=%d",
-                        src_name, src_size, dst_size,
-                    )
+                    # Check if element count matches but dtype differs
+                    src_dtype_str = src_desc.dtype
+                    src_elem_size = 2 if "bfloat16" in src_dtype_str or "float16" in src_dtype_str else 4 if "float32" in src_dtype_str else 1
+                    src_numel = src_size // src_elem_size if src_elem_size > 0 else 0
+                    if src_numel == dst_param.numel():
+                        logger.info(
+                            "Dtype mismatch for %s: source=%s(%d bytes) target=%s(%d bytes) — will cast after transfer",
+                            src_name, src_dtype_str, src_size, dst_param.dtype, dst_size,
+                        )
+                        dtype_cast_needed.append((src_name, src_desc, dst_param, src_dtype_str))
+                    else:
+                        logger.warning(
+                            "Size mismatch for %s: source=%d target=%d (numel src=%d dst=%d)",
+                            src_name, src_size, dst_size, src_numel, dst_param.numel(),
+                        )
             else:
                 unmatched_source.append(src_name)
 
@@ -554,9 +566,20 @@ class MxLiveWeightLoader:
                 len(unmatched_source), unmatched_source[:3],
             )
 
+        # For dtype-mismatched tensors, allocate temp buffers at source dtype
+        dtype_map = {"torch.bfloat16": torch.bfloat16, "torch.float16": torch.float16,
+                     "torch.float32": torch.float32, "torch.uint8": torch.uint8,
+                     "torch.float8_e4m3fn": torch.float8_e4m3fn}
+        cast_buffers = {}
+        for src_name, src_desc, dst_param, src_dtype_str in dtype_cast_needed:
+            src_torch_dtype = dtype_map.get(src_dtype_str, torch.bfloat16)
+            buf = torch.empty(dst_param.numel(), dtype=src_torch_dtype, device=f"cuda:{device_id}")
+            cast_buffers[src_name] = (buf, dst_param)
+            matched.append((src_name, src_desc, buf))
+
         logger.info(
-            "Matched %d/%d params for direct RDMA transfer",
-            len(matched), len(source_descs),
+            "Matched %d/%d params for direct RDMA transfer (%d need dtype cast)",
+            len(matched), len(source_descs), len(dtype_cast_needed),
         )
 
         # 5. Initialize NIXL and register TARGET param buffers
@@ -566,7 +589,7 @@ class MxLiveWeightLoader:
         )
         nixl_mgr.initialize()
 
-        # Register target params with NIXL
+        # Register target params with NIXL (includes temp cast buffers)
         dst_tensors = {name: param for name, _, param in matched}
         nixl_mgr.register_tensors(dst_tensors)
 
@@ -599,6 +622,13 @@ class MxLiveWeightLoader:
             "Rank %d: transferred %d params (%.2f GB) in %.2fs (%.1f Gbps) — DIRECT into model params",
             mpi_rank, n_tensors, bytes_transferred / 1e9, elapsed, bw,
         )
+
+        # 7.5. Apply dtype casts for mismatched tensors
+        for src_name, (buf, dst_param) in cast_buffers.items():
+            dst_param.data.copy_(buf.to(dst_param.dtype))
+            logger.info("Cast %s: %s → %s", src_name, buf.dtype, dst_param.dtype)
+        if cast_buffers:
+            logger.info("Applied %d dtype casts", len(cast_buffers))
 
         nixl_mgr.shutdown()
 
