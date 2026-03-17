@@ -6,32 +6,32 @@ Targets load weights in seconds instead of 15-24 minutes from PVC.
 ## Architecture
 
 ```
-                          ┌─────────────────────────────────┐
-                          │     ModelExpress Server + Redis  │
-                          │  (gRPC metadata, NIXL descriptors)│
-                          └──────┬──────────────┬───────────┘
-                       publish   │              │  query
-                       metadata  │              │  metadata
-                                 │              │
-    ┌────────────────────────────┴──┐   ┌───────┴─────────────────────────┐
-    │  MX Source (DGD, TP=8)        │   │  MX Targets (DGD, disagg)       │
-    │                               │   │                                 │
-    │  1. Load weights from PVC     │   │  1. Query MX server for source  │
-    │  2. model.load_weights()      │   │  2. NIXL RDMA into param bufs   │
-    │  3. ─── PUBLISH HERE ───      │   │  3. post_load_weights()         │
-    │  4. post_load_weights()       │   │  4. NCCL init + serve           │
-    │  5. Serve (keeps GPU memory)  │   │                                 │
-    │                               │   │  Source publishes BEFORE step 4  │
-    │  Node A ┌──┐┌──┐┌──┐┌──┐     │   │  so targets run same transforms │
-    │         │R0││R1││R2││R3│     │   │                                 │
-    │  Node B ┌──┐┌──┐┌──┐┌──┐     │   │  ┌─────────────────────────┐    │
-    │         │R4││R5││R6││R7│     │   │  │ Prefill (TP=8, 2 nodes) │    │
-    │                               │   │  │ Decode  (TP=8, 2 nodes) │    │
-    └───────────────────────────────┘   │  │ Frontend (KV router)    │    │
-                   │                     │  └─────────────────────────┘    │
-                   │    NIXL RDMA        │                                 │
-                   └────────────────────►│  458 Gbps RoCE per rank        │
-                    90.75 GB/rank        └─────────────────────────────────┘
+                     ┌───────────────────────────────────┐
+                     │    ModelExpress Server + Redis     │
+                     │  (gRPC metadata, NIXL descriptors) │
+                     └───────┬───────────────┬───────────┘
+                   publish   │               │  query
+                   metadata  │               │  metadata
+                             │               │
+  ┌──────────────────────────┴──┐  ┌─────────┴──────────────────────────┐
+  │  MX Source (DGD, TP=8)      │  │  MX Targets (DGD)                  │
+  │                             │  │                                    │
+  │  1. Load weights from PVC   │  │  1. Query MX server for source     │
+  │  2. model.load_weights()    │  │  2. NIXL RDMA into param buffers   │
+  │  3. ── PUBLISH HERE ──      │  │  3. post_load_weights()            │
+  │  4. post_load_weights()     │  │  4. NCCL init + serve              │
+  │  5. Serve (holds GPU mem)   │  │                                    │
+  │                             │  │  Source publishes BEFORE step 4    │
+  │  Node A ┌──┐┌──┐┌──┐┌──┐   │  │  so targets run same transforms   │
+  │         │R0││R1││R2││R3│   │  │                                    │
+  │  Node B ┌──┐┌──┐┌──┐┌──┐   │  │  ┌──────────────────────────────┐  │
+  │         │R4││R5││R6││R7│   │  │  │ Prefill  (TP=8, 2 nodes)     │  │
+  │                             │  │  │ Decode   (TP=8, 2 nodes)     │  │
+  └─────────────────────────────┘  │  │ Frontend (KV router)         │  │
+               │                    │  └──────────────────────────────┘  │
+               │   NIXL RDMA        │                                    │
+               └───────────────────►│  400-457 Gbps RoCE per rank       │
+                90.75 GB/rank       └────────────────────────────────────┘
 ```
 
 ---
@@ -249,10 +249,3 @@ Built from three repos — see `docs/TRTLLM_MULTINODE.md` for full details.
 - **modelexpress:** `kavink/trtllm` on `github.com:ai-dynamo/modelexpress`
 - **dynamo:** `kavink/trtllm-p2p` on `github.com:ai-dynamo/dynamo`
 - **TensorRT-LLM:** `kavink/presharded-weight-loading` (local)
-
-## Documentation
-
-- [TRTLLM_MULTINODE.md](../../../docs/TRTLLM_MULTINODE.md) — Architecture, code changes, build process
-- [disagg_trtllm.md](../../../docs/disagg_trtllm.md) — Disagg fixes for GCP GB200
-- [TRTLLM_NUMBERS.md](../../../docs/TRTLLM_NUMBERS.md) — Load time comparisons and benchmarks
-- [disagg_inference_issues.md](../../../docs/disagg_inference_issues.md) — Debugging history
