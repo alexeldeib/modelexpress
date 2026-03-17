@@ -275,6 +275,25 @@ The Dockerfile (`examples/p2p_transfer_trtllm/Dockerfile.ph3-gcp-gb200`):
 3. Copies Dynamo engine/worker files from `dynamo` repo via `--build-context`
 4. Applies TRT-LLM patches: `PRESHARDED` LoadFormat, source publish hook, MPI allgather fix
 
+### Building the base image from dynamo
+
+If you don't have access to `karenc:dynamo-trtllm-v1.0.0-a9b6f95`, build the
+base image from the `dynamo` repo using its rendered Dockerfile:
+
+```bash
+cd ~/work/github/dynamo
+
+docker buildx build --platform linux/arm64 --no-cache \
+    -f container/trtllm-runtime-cuda13.1-arm64-rendered.Dockerfile \
+    --build-arg ARCH=arm64 \
+    --build-arg ARCH_ALT=aarch64 \
+    -t my-registry/dynamo-trtllm-base:latest \
+    --push .
+```
+
+Then update the `FROM` line in `Dockerfile.ph3-gcp-gb200` to point to your
+base image instead of `karenc:dynamo-trtllm-v1.0.0-a9b6f95`.
+
 ### Current image
 
 ```
