@@ -236,16 +236,47 @@ kubectl -n kavin delete computedomain kavin-compute-domain
 
 ---
 
-## Image
+## Building the Image
+
+The image combines three repos into a single ARM64 container layered on the
+Dynamo TRT-LLM base image.
+
+### Repos and branches
+
+| Repo | Branch | What it provides |
+|------|--------|-----------------|
+| `modelexpress` | `kavink/trtllm` | MX client, NIXL transfer, TRT-LLM patches |
+| `dynamo` | `kavink/trtllm-p2p` | Engine P2P hooks (`--model-express-url`) |
+| `TensorRT-LLM` | `kavink/presharded-weight-loading` | `LoadFormat.PRESHARDED` (applied via patches) |
+
+### Directory layout
+
+```
+~/work/github/
+├── modelexpress/   (kavink/trtllm branch)
+└── dynamo/         (kavink/trtllm-p2p branch)
+```
+
+### Build command
+
+```bash
+cd ~/work/github/modelexpress
+
+docker buildx build --platform linux/arm64 --no-cache \
+    -f examples/p2p_transfer_trtllm/Dockerfile.ph3-gcp-gb200 \
+    --build-context dynamo=../dynamo \
+    -t nvcr.io/nvidian/dynamo-dev/kavink:dynamo-trtllm-mx-v1.8.0 \
+    --push .
+```
+
+The Dockerfile (`examples/p2p_transfer_trtllm/Dockerfile.ph3-gcp-gb200`):
+1. Starts from `karenc:dynamo-trtllm-v1.0.0-a9b6f95` (TRT-LLM 1.3.0rc5 + NIXL, ARM64)
+2. Installs ModelExpress Python client (gRPC + NIXL transfer)
+3. Copies Dynamo engine/worker files from `dynamo` repo via `--build-context`
+4. Applies TRT-LLM patches: `PRESHARDED` LoadFormat, source publish hook, MPI allgather fix
+
+### Current image
 
 ```
 nvcr.io/nvidian/dynamo-dev/kavink:dynamo-trtllm-mx-v1.8.0
 ```
-
-Built from three repos — see `docs/TRTLLM_MULTINODE.md` for full details.
-
-## Branches
-
-- **modelexpress:** `kavink/trtllm` on `github.com:ai-dynamo/modelexpress`
-- **dynamo:** `kavink/trtllm-p2p` on `github.com:ai-dynamo/dynamo`
-- **TensorRT-LLM:** `kavink/presharded-weight-loading` (local)
