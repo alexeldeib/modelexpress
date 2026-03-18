@@ -94,7 +94,7 @@ spec:
                 - key: cloud.google.com/gke-nodepool
                   operator: In
                   values:
-                  - customer-gpu-o7v
+                  - customer-gpu-w0e
         containers: null
         imagePullSecrets:
           - name: nvcr-imagepullsecret
@@ -126,6 +126,7 @@ spec:
               name: model-cache
         nodeSelector:
           kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
         tolerations:
           - effect: NoSchedule
             key: dedicated
@@ -153,9 +154,24 @@ spec:
       replicas: 1
       multinode:
         nodeCount: 2
+      annotations:
+        networking.gke.io/default-interface: eth0
+        networking.gke.io/interfaces: |
+          [
+            {"interfaceName":"eth0","network":"default"},
+            {"interfaceName":"rdma0","network":"rdma-0"},
+            {"interfaceName":"rdma1","network":"rdma-1"},
+            {"interfaceName":"rdma2","network":"rdma-2"},
+            {"interfaceName":"rdma3","network":"rdma-3"}
+          ]
       resources:
         limits:
           gpu: "4"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
         claims:
           - name: compute-domain-channel
       readinessProbe:
@@ -166,8 +182,6 @@ spec:
         timeoutSeconds: 30
         failureThreshold: 60
       extraPodSpec:
-        hostNetwork: true
-        dnsPolicy: ClusterFirstWithHostNet
         securityContext: {}
         affinity:
           nodeAffinity:
@@ -177,7 +191,7 @@ spec:
                 - key: cloud.google.com/gke-nodepool
                   operator: In
                   values:
-                  - customer-gpu-o7v
+                  - customer-gpu-w0e
           podAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
@@ -196,6 +210,9 @@ spec:
           securityContext:
             privileged: true
             runAsUser: 0
+            capabilities:
+              add:
+                - IPC_LOCK
           command:
             - python3
             - -m
@@ -264,9 +281,17 @@ spec:
             - name: OMPI_MCA_oob_tcp_if_include
               value: "eth0"
             - name: UCX_TLS
-              value: "self,sm,rc,cuda_copy,gdr_copy,tcp"
+              value: "cuda_ipc,cuda_copy,rc"
             - name: UCX_IB_GID_INDEX
               value: "3"
+            - name: UCX_RC_TIMEOUT
+              value: "600s"
+            - name: UCX_KEEPALIVE_INTERVAL
+              value: "300s"
+            - name: UCX_LOG_LEVEL
+              value: debug
+            - name: NIXL_LOG_LEVEL
+              value: DEBUG
             - name: TRTLLM_UCX_INTERFACE
               value: eth0
             - name: TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER
@@ -298,6 +323,7 @@ spec:
               readOnly: true
         nodeSelector:
           kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
         tolerations:
           - effect: NoSchedule
             key: dedicated
@@ -331,9 +357,24 @@ spec:
       replicas: 1
       multinode:
         nodeCount: 2
+      annotations:
+        networking.gke.io/default-interface: eth0
+        networking.gke.io/interfaces: |
+          [
+            {"interfaceName":"eth0","network":"default"},
+            {"interfaceName":"rdma0","network":"rdma-0"},
+            {"interfaceName":"rdma1","network":"rdma-1"},
+            {"interfaceName":"rdma2","network":"rdma-2"},
+            {"interfaceName":"rdma3","network":"rdma-3"}
+          ]
       resources:
         limits:
           gpu: "4"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
         claims:
           - name: compute-domain-channel
       readinessProbe:
@@ -344,8 +385,6 @@ spec:
         timeoutSeconds: 30
         failureThreshold: 60
       extraPodSpec:
-        hostNetwork: true
-        dnsPolicy: ClusterFirstWithHostNet
         securityContext: {}
         affinity:
           nodeAffinity:
@@ -355,7 +394,7 @@ spec:
                 - key: cloud.google.com/gke-nodepool
                   operator: In
                   values:
-                  - customer-gpu-o7v
+                  - customer-gpu-w0e
           podAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
@@ -374,6 +413,9 @@ spec:
           securityContext:
             privileged: true
             runAsUser: 0
+            capabilities:
+              add:
+                - IPC_LOCK
           command:
             - python3
             - -m
@@ -442,9 +484,17 @@ spec:
             - name: OMPI_MCA_oob_tcp_if_include
               value: "eth0"
             - name: UCX_TLS
-              value: "self,sm,rc,cuda_copy,gdr_copy,tcp"
+              value: "cuda_ipc,cuda_copy,rc"
             - name: UCX_IB_GID_INDEX
               value: "3"
+            - name: UCX_RC_TIMEOUT
+              value: "600s"
+            - name: UCX_KEEPALIVE_INTERVAL
+              value: "300s"
+            - name: UCX_LOG_LEVEL
+              value: debug
+            - name: NIXL_LOG_LEVEL
+              value: DEBUG
             - name: TRTLLM_UCX_INTERFACE
               value: eth0
             - name: TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER
@@ -478,6 +528,7 @@ spec:
               readOnly: true
         nodeSelector:
           kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
         tolerations:
           - effect: NoSchedule
             key: dedicated
