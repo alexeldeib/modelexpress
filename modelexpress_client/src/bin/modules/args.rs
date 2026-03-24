@@ -104,13 +104,13 @@ pub enum ModelCommands {
     /// Show model storage status and usage
     Status,
 
-    /// Clear specific model from storage
+    /// Clear specific model from local P2P client cache (not available in shared storage mode)
     Clear {
         /// Model name to clear
         model_name: String,
     },
 
-    /// Clear all models from storage
+    /// Clear all models from local P2P client cache (not available in shared storage mode)
     ClearAll {
         /// Confirm without prompting
         #[arg(long)]
