@@ -31,6 +31,10 @@ chrono = { workspace = true }
 clap = { workspace = true }
 config = { workspace = true }
 jiff = { workspace = true }
+google-cloud-storage = { version = "1.9.0", default-features = false }
+rustls = { version = "0.23.37", default-features = false, features = ["ring", "std"] }
+crc32c = "0.6.8"
+futures = { workspace = true }
 
 [dev-dependencies]
 mockall = "0.13"

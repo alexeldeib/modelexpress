@@ -115,7 +115,7 @@ async fn main() {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::modules::args::{Cli, Commands};
-    use clap::Parser;
+    use clap::{Parser, ValueEnum};
     use modelexpress_client::ModelProvider;
 
     #[test]
@@ -137,6 +137,16 @@ mod tests {
             panic!("Expected download subcommand");
         };
         assert_eq!(provider, ModelProvider::HuggingFace);
+    }
+
+    #[test]
+    fn test_cli_model_provider_value_enum() {
+        let parsed = ModelProvider::from_str("hugging-face", false)
+            .expect("Failed to parse hugging-face provider");
+        assert_eq!(parsed, ModelProvider::HuggingFace);
+
+        let parsed = ModelProvider::from_str("gcs", false).expect("Failed to parse gcs provider");
+        assert_eq!(parsed, ModelProvider::Gcs);
     }
 
     #[test]
@@ -206,14 +216,18 @@ mod tests {
             "model",
             "clear",
             "--provider",
-            "hugging-face",
-            "dev/bake/qwen/rev123",
+            "gcs",
+            "gs://bucket/dev/bake/qwen/rev123",
         ]);
         assert!(parsed.is_ok());
 
-        let missing_provider =
-            Cli::try_parse_from(["modelexpress-cli", "model", "clear", "dev/bake/qwen/rev123"])
-                .expect("Expected clear command to parse without provider");
+        let missing_provider = Cli::try_parse_from([
+            "modelexpress-cli",
+            "model",
+            "clear",
+            "gs://bucket/dev/bake/qwen/rev123",
+        ])
+        .expect("Expected clear command to parse without provider");
 
         let Commands::Model { command } = missing_provider.command else {
             panic!("Expected model command");
@@ -226,6 +240,6 @@ mod tests {
             panic!("Expected clear subcommand");
         };
         assert_eq!(provider, ModelProvider::HuggingFace);
-        assert_eq!(model_name, "dev/bake/qwen/rev123");
+        assert_eq!(model_name, "gs://bucket/dev/bake/qwen/rev123");
     }
 }
