@@ -97,17 +97,66 @@ class TestCollectModuleTensors:
             assert t.is_cuda
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-    def test_skips_non_contiguous(self):
+    def test_skips_non_contiguous_view_of_module_param(self):
+        """Non-contiguous views of module parameters (e.g. FP8 scale views)
+        are skipped because RDMA updates the parent contiguous tensor and
+        the view automatically reflects the new data. Original strides
+        are preserved for kernels that depend on them (e.g. DeepGemm)."""
         from modelexpress.vllm_loader import _collect_module_tensors
 
         model = nn.Module()
         model.weight = nn.Parameter(torch.randn(4, 3, device="cuda"))
-        model.weight_t = model.weight.data.T
+        model.weight_t = model.weight.data.T  # view of weight's storage
         assert not model.weight_t.is_contiguous()
 
         result = _collect_module_tensors(model)
         assert "weight" in result
+        # View of a module param is skipped (storage covered)
         assert "weight_t" not in result
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_non_contiguous_view_of_intermediate(self):
+        """Non-contiguous views of intermediates (not module params) must be
+        made contiguous and written back. This simulates the MLA attention
+        pattern where get_and_maybe_dequant_weights() creates an intermediate
+        copy, and W_UK_T/W_UV are views of that intermediate."""
+        from modelexpress.vllm_loader import _collect_module_tensors
+
+        model = nn.Module()
+        # Simulate kv_b_proj as a quantized parameter
+        model.kv_b_proj_weight = nn.Parameter(torch.randn(6, 4, device="cuda"))
+
+        # Simulate get_and_maybe_dequant_weights returning a NEW tensor (dequant)
+        intermediate = model.kv_b_proj_weight.data.clone()  # new allocation
+        # Simulate .T → .view → .split → .permute chain
+        w_uk, w_uv = intermediate.T.split([4, 2], dim=-1)
+        model.W_UK_T = w_uk.T  # non-contiguous view of intermediate
+        model.W_UV = w_uv.T    # non-contiguous view of intermediate
+        assert not model.W_UK_T.is_contiguous()
+        assert not model.W_UV.is_contiguous()
+
+        # W_UK_T shares storage with intermediate, NOT kv_b_proj_weight
+        assert model.W_UK_T.data_ptr() != model.kv_b_proj_weight.data_ptr()
+
+        result = _collect_module_tensors(model)
+
+        # All tensors should be collected
+        assert "kv_b_proj_weight" in result
+        assert "W_UK_T" in result
+        assert "W_UV" in result
+
+        # Non-contiguous tensors should have been made contiguous
+        assert result["W_UK_T"].is_contiguous()
+        assert result["W_UV"].is_contiguous()
+
+        # Module attributes should be updated (so forward reads correct data)
+        assert model.W_UK_T.is_contiguous()
+        assert model.W_UV.is_contiguous()
+
+        # Simulating RDMA: writing to result tensors should be visible
+        # through the module attributes (they must be the SAME object)
+        result["W_UK_T"].fill_(42.0)
+        assert model.W_UK_T.flatten()[0].item() == 42.0
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_deduplicate_tied_weights(self):

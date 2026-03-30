@@ -185,33 +185,92 @@ def _iter_module_tensors(
     return results
 
 
+def _resolve_module_attr(
+    root: nn.Module, qualified_name: str
+) -> tuple[nn.Module, str]:
+    """Resolve a dotted qualified name to (parent_module, leaf_attr_name).
+
+    Handles ModuleList/Sequential (numeric indices) and ModuleDict.
+    """
+    parts = qualified_name.split(".")
+    mod = root
+    for p in parts[:-1]:
+        if hasattr(mod, p):
+            mod = getattr(mod, p)
+        elif hasattr(mod, "__getitem__"):
+            mod = mod[int(p)] if p.isdigit() else mod[p]
+        else:
+            raise AttributeError(f"Cannot resolve {p!r} in {qualified_name!r}")
+    return mod, parts[-1]
+
+
 def _collect_module_tensors(model: nn.Module) -> dict[str, torch.Tensor]:
-    """Collect all contiguous CUDA tensors from a module tree into a flat dict.
+    """Collect all CUDA tensors from a module tree into a flat dict.
 
     Uses _iter_module_tensors to find parameters, buffers, and tensor
     attributes, then returns them as a name -> tensor mapping suitable
     for NIXL registration.
 
-    Non-contiguous tensors (e.g. transposed views like W_UK_T) are skipped
-    because they are views over contiguous tensors that are already in the
-    module tree. Transferring the underlying contiguous tensor automatically
-    updates the view.
+    Non-contiguous tensors are handled in two ways:
+    - If their underlying storage is shared with a contiguous tensor
+      already in the module tree (e.g. FP8 scale views), they are
+      skipped — RDMA updates the parent and the view stays correct.
+    - If their storage is NOT reachable through any contiguous module
+      tensor (e.g. W_UK_T derived from a dequantized intermediate),
+      they are made contiguous and written back to the module.
 
     Deduplicates by data_ptr() to avoid registering the same GPU memory
     twice (e.g. tied weights where embed_tokens.weight and lm_head.weight
     share the same tensor).
     """
+    all_tensors = _iter_module_tensors(model)
+
+    # Pass 1: collect storage pointers from all contiguous tensors.
+    # These represent memory regions that RDMA will directly update.
+    contiguous_storage_ptrs: set[int] = set()
+    for _name, tensor, _tt in all_tensors:
+        t = tensor.data if hasattr(tensor, "data") else tensor
+        if t.is_contiguous():
+            contiguous_storage_ptrs.add(t.untyped_storage().data_ptr())
+
+    # Pass 2: build the result dict.
     tensors: dict[str, torch.Tensor] = {}
     seen_ptrs: set[int] = set()
-    skipped_noncontiguous = 0
+    made_contiguous = 0
+    skipped_view = 0
     skipped_duplicate = 0
-    for name, tensor, _tensor_type in _iter_module_tensors(model):
+
+    for name, tensor, tensor_type in all_tensors:
         t = tensor.data if hasattr(tensor, "data") else tensor
 
         if not t.is_contiguous():
-            logger.debug(f"Skipping non-contiguous tensor '{name}' (view of another tensor)")
-            skipped_noncontiguous += 1
-            continue
+            storage_ptr = t.untyped_storage().data_ptr()
+            if storage_ptr in contiguous_storage_ptrs:
+                # Storage is covered by a contiguous tensor we're already
+                # registering. RDMA will update the storage and this view
+                # will see the new data. Preserve original strides so
+                # kernels like DeepGemm that depend on them keep working.
+                logger.debug(
+                    f"Skipping non-contiguous tensor '{name}' "
+                    "(view of a contiguous tensor already registered)"
+                )
+                skipped_view += 1
+                continue
+
+            # Storage is NOT covered — this is a view of an intermediate
+            # (e.g. W_UK_T from get_and_maybe_dequant_weights). Must make
+            # contiguous and write back so RDMA can transfer the data.
+            t = t.contiguous()
+            parent, attr = _resolve_module_attr(model, name)
+            if tensor_type == "parameter":
+                parent._parameters[attr] = nn.Parameter(
+                    t, requires_grad=tensor.requires_grad
+                )
+            elif tensor_type == "buffer" and hasattr(parent, "_buffers"):
+                parent._buffers[attr] = t
+            else:
+                setattr(parent, attr, t)
+            made_contiguous += 1
 
         ptr = t.data_ptr()
         if ptr in seen_ptrs:
@@ -222,9 +281,12 @@ def _collect_module_tensors(model: nn.Module) -> dict[str, torch.Tensor]:
 
         tensors[name] = t
 
-    if skipped_noncontiguous:
+    if made_contiguous:
+        logger.info(f"Made {made_contiguous} non-contiguous tensors contiguous for RDMA transfer")
+    if skipped_view:
         logger.info(
-            f"Skipped {skipped_noncontiguous} non-contiguous tensors (views of contiguous tensors already registered)"
+            f"Skipped {skipped_view} non-contiguous view tensors "
+            "(storage covered by contiguous tensors already registered)"
         )
     if skipped_duplicate:
         logger.info(f"Skipped {skipped_duplicate} duplicate tensors (tied weights sharing the same memory)")
