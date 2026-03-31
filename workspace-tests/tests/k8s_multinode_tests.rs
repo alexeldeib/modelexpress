@@ -30,7 +30,7 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::time::timeout;
 
-const IMAGE: &str = "modelexpress:multinode-test";
+const IMAGE: &str = "localhost:32000/modelexpress:multinode-test";
 const TEST_MODEL: &str = "hf-internal-testing/tiny-random-gpt2";
 const TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -159,8 +159,8 @@ async fn deploy_server(
                             { "name": "MODEL_EXPRESS_LOG_LEVEL", "value": "debug" },
                             { "name": "MODEL_EXPRESS_DATABASE_PATH", "value": "/tmp/models.db" },
                             { "name": "MODEL_EXPRESS_CACHE_DIRECTORY", "value": "/root" },
+                            { "name": "MX_METADATA_BACKEND", "value": "kubernetes" },
                             { "name": "HOME", "value": "/root" },
-                            { "name": "REDIS_URL", "value": "redis://127.0.0.1:1" },
                         ],
                         "readinessProbe": {
                             "tcpSocket": { "port": 8001 },
