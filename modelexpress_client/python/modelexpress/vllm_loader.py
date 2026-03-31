@@ -299,6 +299,93 @@ def _build_source_identity(
     )
 
 
+def _download_s3_directory(s3_uri: str, local_dir: str) -> None:
+    """Download all files from an S3 prefix to a local directory.
+
+    Uses boto3 with the same parallel download pattern as the standard
+    CoreWeave model downloader. Respects AWS_ENDPOINT_URL for lota proxy.
+    """
+    import boto3
+    from boto3.s3 import transfer
+    from urllib.parse import urlparse
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
+
+    parsed = urlparse(s3_uri)
+    if parsed.scheme != "s3":
+        raise ValueError(f"Expected s3:// URI, got: {s3_uri}")
+    bucket = parsed.netloc
+    prefix = parsed.path.lstrip("/")
+
+    s3_client = boto3.client("s3")
+    xfer_config = transfer.TransferConfig(
+        max_concurrency=10,
+        multipart_threshold=100 * transfer.MB,
+        multipart_chunksize=100 * transfer.MB,
+    )
+
+    paginator = s3_client.get_paginator("list_objects_v2")
+    objects = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            rel_path = os.path.relpath(obj["Key"], prefix)
+            local_path = os.path.join(local_dir, rel_path)
+            objects.append((bucket, obj["Key"], local_path))
+
+    if not objects:
+        raise FileNotFoundError(
+            f"No objects found at s3://{bucket}/{prefix}"
+        )
+
+    logger.info(f"Downloading {len(objects)} files from {s3_uri} to {local_dir}")
+    download_start = time.perf_counter()
+
+    def _download_one(args: tuple[str, str, str]) -> None:
+        bkt, key, path = args
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        s3_client.download_file(bkt, key, path, Config=xfer_config)
+
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        list(pool.map(_download_one, objects))
+
+    elapsed = time.perf_counter() - download_start
+    total_bytes = sum(
+        os.path.getsize(p) for _, _, p in objects if os.path.exists(p)
+    )
+    logger.info(
+        f"S3 download complete: {len(objects)} files, "
+        f"{total_bytes / 1e9:.2f} GB in {elapsed:.1f}s"
+    )
+
+
+def _ensure_model_available(model_config: ModelConfig) -> None:
+    """Download model from S3 if MX_FALLBACK_S3_PATH is set and local files are missing.
+
+    When configured, this allows vLLM pods to skip the init container download
+    entirely. The first pod (no P2P source) downloads from S3 on demand; subsequent
+    pods receive weights via RDMA and never trigger this path.
+    """
+    from pathlib import Path
+
+    s3_path = os.environ.get("MX_FALLBACK_S3_PATH")
+    if not s3_path:
+        return
+
+    model_path = Path(model_config.model)
+    if model_path.is_dir() and any(model_path.glob("*.safetensors")):
+        logger.info(
+            f"Model files found at {model_path}, skipping S3 download"
+        )
+        return
+
+    logger.info(
+        f"No local model files at {model_path}, "
+        f"downloading from {s3_path}"
+    )
+    model_path.mkdir(parents=True, exist_ok=True)
+    _download_s3_directory(s3_path, str(model_path))
+
+
 def _publish_metadata_and_ready(
     mx_client: MxClient,
     nixl_manager: NixlTransferManager,
@@ -599,16 +686,32 @@ class MxModelLoader(BaseModelLoader):
         mx_source_id: str,
         source_worker_id: str,
     ) -> None:
-        """Receive fully-processed weights via RDMA from an existing source."""
+        """Receive weights via RDMA from an existing source.
+
+        For quantized models (FP4/FP8), receives PRE-processed weights and
+        then runs process_weights_after_loading() locally. This ensures
+        quantization scales are computed from real data, not dummy data.
+
+        For unquantized models (BF16/FP16), receives POST-processed weights
+        directly since process_weights_after_loading() is data-independent.
+        """
+        is_quantized = bool(model_config.quantization)
+
         # Create dummy weights as receive buffers
         self._dummy_loader.load_weights(model, model_config)
 
-        # Process dummy weights to establish final tensor layout
-        process_weights_after_loading(model, model_config, target_device)
-
-        # RDMA receive (fully-processed tensors, no post-processing needed)
-        # Raises SourceTransferError on source-side failures
-        self._receive_from_peer(model, global_rank, device_id, source_worker)
+        if is_quantized:
+            # Quantized: receive raw weights FIRST, then post-process.
+            # Source registered PRE-processed tensors for quantized models.
+            # Both sides independently run process_weights_after_loading()
+            # on the same real data, producing identical scales.
+            self._receive_from_peer(model, global_rank, device_id, source_worker)
+            process_weights_after_loading(model, model_config, target_device)
+        else:
+            # Unquantized: post-process first (establishes layout), then receive.
+            # Source registered POST-processed tensors.
+            process_weights_after_loading(model, model_config, target_device)
+            self._receive_from_peer(model, global_rank, device_id, source_worker)
 
         # Publish metadata so future nodes can discover us
         self._publish_metadata(global_rank, device_id, identity)
@@ -683,7 +786,15 @@ class MxModelLoader(BaseModelLoader):
         device_id: int,
         identity: "p2p_pb2.SourceIdentity",
     ) -> None:
-        """Load weights via GDS or disk, process, then register + publish."""
+        """Load weights via GDS or disk, process, then register + publish.
+
+        For quantized models, registers PRE-processed tensors so that targets
+        can receive raw weights and run process_weights_after_loading() locally
+        (producing correct quantization scales from real data).
+
+        For unquantized models, registers POST-processed tensors since
+        process_weights_after_loading() is data-independent.
+        """
         loaded_via_gds = False
 
         if is_gds_available():
@@ -692,16 +803,25 @@ class MxModelLoader(BaseModelLoader):
             )
 
         if not loaded_via_gds:
+            _ensure_model_available(model_config)
             logger.info(f"[Worker {device_id}] Loading weights from disk...")
             self._default_loader.load_weights(model, model_config)
             logger.info(f"[Worker {device_id}] Weights loaded from disk")
 
-        # Process weights FIRST, then register final tensors
-        process_weights_after_loading(model, model_config, target_device)
+        is_quantized = bool(model_config.quantization)
 
-        # Register tensors + publish metadata
-        self._register_tensors(model, global_rank, device_id)
-        self._publish_metadata(global_rank, device_id, identity)
+        if is_quantized:
+            # Quantized: register PRE-processed tensors for P2P transfer,
+            # then post-process for local serving. Targets will independently
+            # run process_weights_after_loading() on the received data.
+            self._register_tensors(model, global_rank, device_id)
+            self._publish_metadata(global_rank, device_id, identity)
+            process_weights_after_loading(model, model_config, target_device)
+        else:
+            # Unquantized: post-process first, then register final tensors.
+            process_weights_after_loading(model, model_config, target_device)
+            self._register_tensors(model, global_rank, device_id)
+            self._publish_metadata(global_rank, device_id, identity)
 
     def _try_gds_load(
         self,
@@ -763,6 +883,9 @@ class MxModelLoader(BaseModelLoader):
 
     def _publish_metadata(self, global_rank: int, device_id: int, identity: "p2p_pb2.SourceIdentity") -> None:
         """Publish metadata to the MX server."""
+        if self._nixl_manager is None:
+            logger.warning(f"[Worker {global_rank}] NIXL not available, skipping metadata publish")
+            return
         _publish_metadata_and_ready(
             self._mx_client, self._nixl_manager, self._tensors,
             global_rank, device_id, identity, self._worker_id

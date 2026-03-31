@@ -30,8 +30,13 @@ try:
     from nixl._api import nixl_agent as NixlAgent
     from nixl._api import nixl_agent_config
     NIXL_AVAILABLE = True
-except ImportError:
-    pass
+except (ImportError, OSError):
+    try:
+        from nixl_cu12._api import nixl_agent as NixlAgent
+        from nixl_cu12._api import nixl_agent_config
+        NIXL_AVAILABLE = True
+    except (ImportError, OSError):
+        pass
 
 
 def is_nixl_available() -> bool:
@@ -368,7 +373,7 @@ class NixlTransferManager:
         if use_raw_descriptors:
             # Use raw address descriptors for coalesced regions
             dst_prepped = self._agent.prep_xfer_dlist(
-                agent_name="",
+                agent_name="NIXL_INIT_AGENT",
                 xfer_list=local_descs,
                 mem_type="cuda",
                 backends=["UCX"],
@@ -376,7 +381,7 @@ class NixlTransferManager:
         else:
             # Use tensor objects
             dst_prepped = self._agent.prep_xfer_dlist(
-                agent_name="",
+                agent_name="NIXL_INIT_AGENT",
                 xfer_list=local_descs,
                 mem_type="cuda",
                 backends=["UCX"],
@@ -391,7 +396,6 @@ class NixlTransferManager:
             local_indices=indices,
             remote_xfer_side=src_prepped,
             remote_indices=indices,
-            backends=["UCX"],
         )
         self._agent.transfer(handle)
 
