@@ -319,15 +319,29 @@ class NixlTransferManager:
             local_tensor_list = []
             total_bytes = 0
             matched_tensors = 0
+            skipped_tensors = []
 
             for src_tensor in source_tensors:
                 if src_tensor.name not in self._tensors:
+                    skipped_tensors.append(src_tensor.name)
                     continue
                 local_tensor = self._tensors[src_tensor.name]
                 remote_descs.append((src_tensor.addr, src_tensor.size, src_tensor.device_id))
                 local_tensor_list.append(local_tensor)
                 total_bytes += src_tensor.size
                 matched_tensors += 1
+
+            if skipped_tensors:
+                logger.warning(
+                    f"[Transfer] {len(skipped_tensors)} source tensors NOT found on target "
+                    f"(first 10: {skipped_tensors[:10]})"
+                )
+                local_only = set(self._tensors.keys()) - {t.name for t in source_tensors}
+                if local_only:
+                    logger.warning(
+                        f"[Transfer] {len(local_only)} target tensors NOT on source "
+                        f"(first 10: {sorted(local_only)[:10]})"
+                    )
 
             if not remote_descs:
                 logger.warning("No matching tensors found for transfer")
