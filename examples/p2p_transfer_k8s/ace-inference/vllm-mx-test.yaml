@@ -1,0 +1,149 @@
+# vLLM with ModelExpress P2P loader for ace-inference e2e testing.
+# Uses Qwen3-4B (small, 1 GPU) for fast iteration.
+#
+# Flow:
+#   Pod 1 (source): downloads from HF -> loads to GPU -> registers as P2P source
+#   Pod 2 (target): discovers source -> RDMA transfer -> done
+#
+# Deploy:
+#   kubectl apply -f examples/p2p_transfer_k8s/ace-inference/vllm-mx-test.yaml
+# Scale:
+#   kubectl scale deploy mx-vllm-test -n ace-inference --replicas=2
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-vllm-test
+  namespace: ace-inference
+  labels:
+    app: mx-vllm-test
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  selector:
+    app: mx-vllm-test
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-vllm-test
+  namespace: ace-inference
+  labels:
+    app: mx-vllm-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mx-vllm-test
+  template:
+    metadata:
+      labels:
+        app: mx-vllm-test
+    spec:
+      serviceAccountName: modelexpress
+      containers:
+        - name: vllm
+          image: accel-registry.cwcr.cloud/cw4637/vllm-mx:v2.4.0-mx0.3.0
+          imagePullPolicy: Always
+          command: ["vllm", "serve"]
+          args:
+            - --model=Qwen/Qwen3-4B-Instruct-2507
+            - --host=0.0.0.0
+            - --port=8000
+            - --served-model-name=Qwen/Qwen3-4B-Instruct-2507
+            - --load-format=mx
+            - --tensor-parallel-size=1
+            - --max-model-len=4096
+            - --gpu-memory-utilization=0.9
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+          env:
+            # ModelExpress P2P
+            - name: VLLM_PLUGINS
+              value: "modelexpress"
+            - name: MX_SERVER_ADDRESS
+              value: "modelexpress-server:8001"
+            - name: MX_CONTIGUOUS_REG
+              value: "0"
+            # UCX/RDMA with Data Direct (UCX_MODULE_DIR set in image ENV)
+            - name: UCX_TLS
+              value: "rc_x,rc,dc_x,dc,cuda_copy"
+            - name: UCX_RNDV_SCHEME
+              value: "get_zcopy"
+            - name: UCX_RNDV_THRESH
+              value: "0"
+            - name: UCX_IB_GPU_DIRECT_RDMA
+              value: "yes"
+            - name: UCX_CUDA_COPY_DMABUF
+              value: "yes"
+            - name: UCX_MAX_RMA_RAILS
+              value: "4"
+            - name: NIXL_LOG_LEVEL
+              value: "INFO"
+            - name: UCX_MEMTYPE_CACHE
+              value: "n"
+            - name: UCX_MEM_MMAP_HOOK_MODE
+              value: "none"
+            # HuggingFace (download model on first pod)
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: inference-backends-hf-secret
+                  key: HF_TOKEN
+            - name: HF_HUB_OFFLINE
+              value: "0"
+            # Lota S3 proxy (for future S3 fallback)
+            - name: AWS_ENDPOINT_URL
+              value: "http://cwlota.com"
+            # Misc
+            - name: VLLM_RPC_TIMEOUT
+              value: "600000"
+            - name: OMP_NUM_THREADS
+              value: "10"
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+              memory: "40Gi"
+              cpu: "10"
+            limits:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+              memory: "40Gi"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 30
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: tmp
+              mountPath: /tmp
+      nodeSelector:
+        node.kubernetes.io/instance-type: gb200-4x-l
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        - name: tmp
+          emptyDir: {}

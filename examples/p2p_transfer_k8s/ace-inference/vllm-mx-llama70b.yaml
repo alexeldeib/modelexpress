@@ -1,0 +1,158 @@
+# vLLM + ModelExpress P2P for Llama-3.1-70B-Instruct (BF16, TP=4).
+# Clean test: no quantization, no FP8/FP4, vanilla BF16 weights.
+#
+# Deploy: kubectl apply -f examples/p2p_transfer_k8s/ace-inference/vllm-mx-llama70b.yaml
+# Scale:  kubectl scale deploy mx-vllm-llama70b -n ace-inference --replicas=2
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-vllm-llama70b
+  namespace: ace-inference
+  labels:
+    app: mx-vllm-llama70b
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  selector:
+    app: mx-vllm-llama70b
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-vllm-llama70b
+  namespace: ace-inference
+  labels:
+    app: mx-vllm-llama70b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mx-vllm-llama70b
+  template:
+    metadata:
+      labels:
+        app: mx-vllm-llama70b
+    spec:
+      serviceAccountName: modelexpress
+      initContainers:
+        - name: downloader
+          image: accel-registry.cwcr.cloud/cw4637/vllm-mx:v2.4.0-mx0.3.0
+          imagePullPolicy: Always
+          command: ["python3", "/root/scripts/downloader.py"]
+          args:
+            - "s3://infr/raw/meta-llama/Llama-3.1-70B-Instruct/1605565b47bb9346c5515c34102e054115b4f98b"
+            - "/tmp/meta-llama/Llama-3.1-70B-Instruct"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: obj-config
+              mountPath: /root/.aws
+          env:
+            - name: AWS_ENDPOINT_URL
+              value: "http://cwlota.com"
+      containers:
+        - name: vllm
+          image: accel-registry.cwcr.cloud/cw4637/vllm-mx:v2.4.0-mx0.3.0
+          imagePullPolicy: Always
+          command: ["vllm", "serve"]
+          args:
+            - --model=/tmp/meta-llama/Llama-3.1-70B-Instruct
+            - --host=0.0.0.0
+            - --port=8000
+            - --served-model-name=meta-llama/Llama-3.1-70B-Instruct
+            - --load-format=mx
+            - --tensor-parallel-size=4
+            - --max-model-len=4096
+            - --gpu-memory-utilization=0.9
+            - --max-num-seqs=64
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK"]
+          env:
+            - name: VLLM_PLUGINS
+              value: "modelexpress"
+            - name: MX_SERVER_ADDRESS
+              value: "modelexpress-server:8001"
+            - name: MX_CONTIGUOUS_REG
+              value: "0"
+            # UCX RDMA
+            - name: UCX_TLS
+              value: "rc_verbs,ud_verbs,cuda_copy,cuda_ipc"
+            - name: UCX_IB_GPU_DIRECT_RDMA
+              value: "yes"
+            - name: UCX_CUDA_COPY_DMABUF
+              value: "yes"
+            - name: UCX_MAX_RMA_RAILS
+              value: "4"
+            - name: UCX_MAX_RNDV_RAILS
+              value: "4"
+            - name: NIXL_LOG_LEVEL
+              value: "INFO"
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: AWS_ENDPOINT_URL
+              value: "http://cwlota.com"
+            - name: VLLM_RPC_TIMEOUT
+              value: "1200000"
+            - name: OMP_NUM_THREADS
+              value: "17"
+            - name: NCCL_SOCKET_IFNAME
+              value: "eth0"
+          resources:
+            requests:
+              nvidia.com/gpu: "4"
+              rdma/ib: "1"
+              memory: "400Gi"
+              cpu: "40"
+            limits:
+              nvidia.com/gpu: "4"
+              rdma/ib: "1"
+              memory: "400Gi"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 80
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 30
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: tmp
+              mountPath: /tmp
+            - name: obj-config
+              mountPath: /root/.aws
+      nodeSelector:
+        node.kubernetes.io/instance-type: gb200-4x-l
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        - name: tmp
+          emptyDir: {}
+        - name: obj-config
+          secret:
+            defaultMode: 256
+            secretName: inference-backends-obj-secret

@@ -1,0 +1,98 @@
+# ModelExpress server with Redis sidecar for ace-inference namespace.
+# Coordinates P2P metadata — no GPU required.
+#
+# Deploy:
+#   kubectl apply -f examples/p2p_transfer_k8s/ace-inference/modelexpress-server.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: modelexpress
+  namespace: ace-inference
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: modelexpress-server
+  namespace: ace-inference
+  labels:
+    app: modelexpress-server
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8001
+      targetPort: 8001
+      name: grpc
+  selector:
+    app: modelexpress-server
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: modelexpress-server
+  namespace: ace-inference
+  labels:
+    app: modelexpress-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: modelexpress-server
+  template:
+    metadata:
+      labels:
+        app: modelexpress-server
+    spec:
+      initContainers:
+        - name: redis
+          image: redis:7-alpine
+          restartPolicy: Always
+          ports:
+            - containerPort: 6379
+          resources:
+            limits:
+              cpu: "1"
+              memory: 2Gi
+            requests:
+              cpu: 500m
+              memory: 1Gi
+          startupProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            periodSeconds: 10
+      containers:
+        - name: modelexpress-server
+          image: accel-registry.cwcr.cloud/cw4637/modelexpress-server:0.3.0
+          ports:
+            - containerPort: 8001
+          env:
+            - name: MX_METADATA_BACKEND
+              value: "redis"
+            - name: REDIS_URL
+              value: "redis://localhost:6379"
+            - name: MODEL_EXPRESS_LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          livenessProbe:
+            tcpSocket:
+              port: 8001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      nodeSelector:
+        node.kubernetes.io/instance-type: gb200-4x-l

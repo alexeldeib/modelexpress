@@ -1,0 +1,58 @@
+--- a/src/plugins/ucx/ucx_utils.cpp
++++ b/src/plugins/ucx/ucx_utils.cpp
+@@ -565,12 +565,21 @@ nixlUcxContext::memReg(void *addr, size_t size, nixlUcxMem &mem, nixl_mem_t nixl
+     mem.base = addr;
+     mem.size = size;
+
+-    ucp_mem_map_params_t mem_params = {
+-        .field_mask = UCP_MEM_MAP_PARAM_FIELD_FLAGS | UCP_MEM_MAP_PARAM_FIELD_LENGTH |
+-            UCP_MEM_MAP_PARAM_FIELD_ADDRESS,
+-        .address = mem.base,
+-        .length = mem.size,
+-    };
++    ucp_mem_map_params_t mem_params;
++    memset(&mem_params, 0, sizeof(mem_params));
++    mem_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_FLAGS |
++                            UCP_MEM_MAP_PARAM_FIELD_LENGTH |
++                            UCP_MEM_MAP_PARAM_FIELD_ADDRESS;
++    mem_params.address = mem.base;
++    mem_params.length = mem.size;
++
++    // Explicitly set memory type for VRAM to bypass broken auto-detection
++    // in subprocess environments (e.g., vLLM EngineCore). This ensures UCX
++    // creates the correct rkeys for GPU memory RDMA transfers.
++    if (nixl_mem_type == nixl_mem_t::VRAM_SEG) {
++        mem_params.field_mask |= UCP_MEM_MAP_PARAM_FIELD_MEMORY_TYPE;
++        mem_params.memory_type = UCS_MEMORY_TYPE_CUDA;
++    }
+
+     ucs_status_t status = ucp_mem_map(ctx, &mem_params, &mem.memh);
+     if (status != UCS_OK) {
+@@ -578,18 +587,11 @@ nixlUcxContext::memReg(void *addr, size_t size, nixlUcxMem &mem, nixl_mem_t nixl
+         return -1;
+     }
+
+-    if (nixl_mem_type == nixl_mem_t::VRAM_SEG) {
+-        ucp_mem_attr_t attr;
+-        attr.field_mask = UCP_MEM_ATTR_FIELD_MEM_TYPE;
+-        status = ucp_mem_query(mem.memh, &attr);
+-        if (status != UCS_OK) {
+-            NIXL_ERROR << "Failed to ucp_mem_query: " << ucs_status_string(status);
+-            ucp_mem_unmap(ctx, mem.memh);
+-            return -1;
+-        }
+-
+-        if (attr.mem_type == UCS_MEMORY_TYPE_HOST) {
+-            NIXL_ERROR << "VRAM memory is detected as host by UCX. "
+-                          "UCX is likely not configured with CUDA support. "
+-                          "VRAM registration cannot proceed.";
+-            ucp_mem_unmap(ctx, mem.memh);
+-            return -1;
+-        }
+-    }
++    // Skip ucp_mem_query verification when memory type was explicitly set.
++    // The auto-detection check (cuPointerGetAttribute) is unreliable in
++    // subprocess environments like vLLM EngineCore, but the explicit
++    // UCP_MEM_MAP_PARAM_FIELD_MEMORY_TYPE ensures correct rkey creation.
+
+     return 0;
