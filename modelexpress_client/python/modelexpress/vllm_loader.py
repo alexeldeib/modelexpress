@@ -695,16 +695,22 @@ class MxModelLoader(BaseModelLoader):
         For unquantized models (BF16/FP16), receives POST-processed weights
         directly since process_weights_after_loading() is data-independent.
         """
+        is_quantized = bool(model_config.quantization)
+
         # Create dummy weights as receive buffers
         self._dummy_loader.load_weights(model, model_config)
 
-        # Process dummy weights to establish final tensor layout.
-        # This creates the same set of tensors (parameters + buffers + attributes
-        # like quantization scales) as the source, with matching names and shapes.
-        process_weights_after_loading(model, model_config, target_device)
-
-        # RDMA receive overwrites ALL tensor data with real values from source.
-        self._receive_from_peer(model, global_rank, device_id, source_worker)
+        if is_quantized:
+            # Quantized: receive raw weights via RDMA FIRST, then process.
+            # Source registered PRE-processed tensors. Both source and target
+            # independently run process_weights_after_loading() on the same
+            # real data, producing identical scales and weight layouts.
+            self._receive_from_peer(model, global_rank, device_id, source_worker)
+            process_weights_after_loading(model, model_config, target_device)
+        else:
+            # Unquantized: process first (no-op for BF16), then receive.
+            process_weights_after_loading(model, model_config, target_device)
+            self._receive_from_peer(model, global_rank, device_id, source_worker)
 
         # Publish metadata so future nodes can discover us
         self._publish_metadata(global_rank, device_id, identity)
@@ -801,13 +807,20 @@ class MxModelLoader(BaseModelLoader):
             self._default_loader.load_weights(model, model_config)
             logger.info(f"[Worker {device_id}] Weights loaded from disk")
 
-        # Process weights FIRST, then register final tensors.
-        # Source always registers POST-processed tensors (weights + scales + buffers).
-        process_weights_after_loading(model, model_config, target_device)
+        is_quantized = bool(model_config.quantization)
 
-        # Register tensors + publish metadata
-        self._register_tensors(model, global_rank, device_id)
-        self._publish_metadata(global_rank, device_id, identity)
+        if is_quantized:
+            # Quantized: register PRE-processed tensors for P2P, then process.
+            # Target receives raw weights and processes locally, ensuring
+            # quantization scales and weight layouts are computed from real data.
+            self._register_tensors(model, global_rank, device_id)
+            self._publish_metadata(global_rank, device_id, identity)
+            process_weights_after_loading(model, model_config, target_device)
+        else:
+            # Unquantized: process first (no-op for BF16), then register.
+            process_weights_after_loading(model, model_config, target_device)
+            self._register_tensors(model, global_rank, device_id)
+            self._publish_metadata(global_rank, device_id, identity)
 
     def _try_gds_load(
         self,
