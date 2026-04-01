@@ -105,7 +105,7 @@ spec:
             - name: MX_SERVER_ADDRESS
               value: "modelexpress-server:8001"
             - name: MX_CONTIGUOUS_REG
-              value: "0"
+              value: "1"
             # S3 fallback — download from object storage if no P2P source
             - name: MX_FALLBACK_S3_PATH
               value: "s3://infr/raw/nvidia/Kimi-K2.5-NVFP4/e4e908c073784de20ad3af0be653421f1088922d"
@@ -161,9 +161,9 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 60
+            initialDelaySeconds: 120
             periodSeconds: 30
-            failureThreshold: 200
+            failureThreshold: 400
           livenessProbe:
             httpGet:
               path: /health

@@ -321,16 +321,42 @@ class NixlTransferManager:
             matched_tensors = 0
             skipped_tensors = []
 
+            size_mismatches = []
             for src_tensor in source_tensors:
                 if src_tensor.name not in self._tensors:
                     skipped_tensors.append(src_tensor.name)
                     continue
                 local_tensor = self._tensors[src_tensor.name]
+                local_size = local_tensor.numel() * local_tensor.element_size()
+                if src_tensor.size != local_size:
+                    size_mismatches.append(
+                        f"{src_tensor.name}: src={src_tensor.size} dst={local_size}"
+                    )
                 remote_descs.append((src_tensor.addr, src_tensor.size, src_tensor.device_id))
                 local_tensor_list.append(local_tensor)
                 total_bytes += src_tensor.size
                 matched_tensors += 1
 
+            if size_mismatches:
+                import sys
+                print(
+                    f"[MX-TRANSFER] {len(size_mismatches)} TENSOR SIZE MISMATCHES! "
+                    f"First 10: {size_mismatches[:10]}",
+                    file=sys.stderr, flush=True
+                )
+
+            import sys
+            print(
+                f"[MX-TRANSFER] Matched {matched_tensors}/{len(source_tensors)} tensors, "
+                f"skipped {len(skipped_tensors)}, size_mismatches {len(size_mismatches)}, "
+                f"total {total_bytes/1e9:.2f} GB",
+                file=sys.stderr, flush=True
+            )
+            if skipped_tensors:
+                print(
+                    f"[MX-TRANSFER] Skipped (first 10): {skipped_tensors[:10]}",
+                    file=sys.stderr, flush=True
+                )
             if skipped_tensors:
                 logger.warning(
                     f"[Transfer] {len(skipped_tensors)} source tensors NOT found on target "
@@ -376,16 +402,22 @@ class NixlTransferManager:
             use_raw_descriptors = False
             coalesced_count = matched_tensors
 
-        # Prepare transfer
+        # Prepare and execute transfer
+        import sys
+        print(
+            f"[MX-TRANSFER] Preparing {len(remote_descs)} descriptors, "
+            f"coalesced={coalesced_count}, raw={use_raw_descriptors}",
+            file=sys.stderr, flush=True
+        )
         src_prepped = self._agent.prep_xfer_dlist(
             agent_name=remote_agent_name,
             xfer_list=remote_descs,
             mem_type="cuda",
             backends=["UCX"],
         )
+        print("[MX-TRANSFER] Remote prep OK", file=sys.stderr, flush=True)
 
         if use_raw_descriptors:
-            # Use raw address descriptors for coalesced regions
             dst_prepped = self._agent.prep_xfer_dlist(
                 agent_name="NIXL_INIT_AGENT",
                 xfer_list=local_descs,
@@ -393,17 +425,16 @@ class NixlTransferManager:
                 backends=["UCX"],
             )
         else:
-            # Use tensor objects
             dst_prepped = self._agent.prep_xfer_dlist(
                 agent_name="NIXL_INIT_AGENT",
                 xfer_list=local_descs,
                 mem_type="cuda",
                 backends=["UCX"],
             )
+        print("[MX-TRANSFER] Local prep OK", file=sys.stderr, flush=True)
 
         indices = list(range(len(remote_descs)))
 
-        # Execute transfer
         handle = self._agent.make_prepped_xfer(
             operation="READ",
             local_xfer_side=dst_prepped,
@@ -411,6 +442,7 @@ class NixlTransferManager:
             remote_xfer_side=src_prepped,
             remote_indices=indices,
         )
+        print("[MX-TRANSFER] make_prepped_xfer OK, starting transfer...", file=sys.stderr, flush=True)
         self._agent.transfer(handle)
 
         # Wait for completion

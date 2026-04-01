@@ -701,11 +701,9 @@ class MxModelLoader(BaseModelLoader):
         # Process dummy weights to establish final tensor layout.
         # This creates the same set of tensors (parameters + buffers + attributes
         # like quantization scales) as the source, with matching names and shapes.
-        # RDMA then overwrites ALL values — weights AND scales — with real data.
         process_weights_after_loading(model, model_config, target_device)
 
-        # RDMA receive (fully-processed tensors, no post-processing needed).
-        # Raises SourceTransferError on source-side failures.
+        # RDMA receive overwrites ALL tensor data with real values from source.
         self._receive_from_peer(model, global_rank, device_id, source_worker)
 
         # Publish metadata so future nodes can discover us
