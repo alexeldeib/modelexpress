@@ -822,7 +822,7 @@ class MxModelLoader(BaseModelLoader):
             tensors = _collect_module_tensors(model)
             sample = list(tensors.items())[:3]
             for name, t in sample:
-                data = t.cpu().contiguous().numpy().tobytes()
+                data = t.cpu().contiguous().float().numpy().tobytes()
                 h = hashlib.md5(data).hexdigest()[:12]
                 print(f"[MX-SOURCE-VERIFY] {name}: shape={t.shape} dtype={t.dtype} md5={h}",
                       file=sys.stderr, flush=True)

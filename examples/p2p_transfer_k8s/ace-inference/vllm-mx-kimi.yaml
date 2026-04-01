@@ -157,25 +157,14 @@ spec:
               nvidia.com/gpu: "4"
               rdma/ib: "1"
               memory: "256Gi"
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 120
-            periodSeconds: 30
-            failureThreshold: 400
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            periodSeconds: 30
-            failureThreshold: 6
+          # Probes removed — Kimi warmup can take 20+ minutes
           readinessProbe:
             httpGet:
               path: /health
               port: 8000
-            periodSeconds: 10
-            failureThreshold: 3
+            initialDelaySeconds: 600
+            periodSeconds: 30
+            failureThreshold: 100
           volumeMounts:
             - name: shm
               mountPath: /dev/shm
