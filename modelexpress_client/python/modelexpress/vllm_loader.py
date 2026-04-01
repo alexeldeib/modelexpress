@@ -717,9 +717,17 @@ class MxModelLoader(BaseModelLoader):
                 if idx >= len(items):
                     break
                 name, t = items[idx]
-                s = t.view(-1)[:min(8, t.numel())].float()
-                print(f"[MX-DST] [{idx}] {name}: {t.shape} {t.dtype} first8={s.tolist()}",
-                      file=sys.stderr, flush=True)
+                try:
+                    raw = t.view(-1)[:min(8, t.numel())]
+                    if raw.dtype in (torch.uint8, torch.int8, torch.int32, torch.int64):
+                        vals = raw.tolist()
+                    else:
+                        vals = raw.float().tolist()
+                    print(f"[MX-DST] [{idx}] {name}: {t.shape} {t.dtype} vals={vals}",
+                          file=sys.stderr, flush=True)
+                except Exception as e:
+                    print(f"[MX-DST] [{idx}] {name}: {t.shape} {t.dtype} ERR={e}",
+                          file=sys.stderr, flush=True)
 
         # Publish metadata so future nodes can discover us
         self._publish_metadata(global_rank, device_id, identity)
@@ -828,9 +836,18 @@ class MxModelLoader(BaseModelLoader):
                 if idx >= len(items):
                     break
                 name, t = items[idx]
-                s = t.view(-1)[:min(8, t.numel())].float()
-                print(f"[MX-SRC] [{idx}] {name}: {t.shape} {t.dtype} first8={s.tolist()}",
-                      file=sys.stderr, flush=True)
+                try:
+                    raw = t.view(-1)[:min(8, t.numel())]
+                    # Handle non-float types safely
+                    if raw.dtype in (torch.uint8, torch.int8, torch.int32, torch.int64):
+                        vals = raw.tolist()
+                    else:
+                        vals = raw.float().tolist()
+                    print(f"[MX-SRC] [{idx}] {name}: {t.shape} {t.dtype} vals={vals}",
+                          file=sys.stderr, flush=True)
+                except Exception as e:
+                    print(f"[MX-SRC] [{idx}] {name}: {t.shape} {t.dtype} ERR={e}",
+                          file=sys.stderr, flush=True)
 
         self._register_tensors(model, global_rank, device_id)
         self._publish_metadata(global_rank, device_id, identity)
