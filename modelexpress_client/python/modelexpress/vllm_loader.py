@@ -713,7 +713,7 @@ class MxModelLoader(BaseModelLoader):
             import sys
             tensors = _collect_module_tensors(model)
             items = list(tensors.items())
-            for idx in [0, 100, 200]:
+            for idx in [0, 500, 1000]:
                 if idx >= len(items):
                     break
                 name, t = items[idx]
@@ -832,7 +832,7 @@ class MxModelLoader(BaseModelLoader):
             import sys
             tensors = _collect_module_tensors(model)
             items = list(tensors.items())
-            for idx in [0, 100, 200]:
+            for idx in [0, 500, 1000]:
                 if idx >= len(items):
                     break
                 name, t = items[idx]
