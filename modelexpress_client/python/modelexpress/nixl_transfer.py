@@ -453,10 +453,17 @@ class NixlTransferManager:
                 raise TimeoutError("Transfer timed out")
 
             status = self._agent.check_xfer_state(handle)
-            if status in ("DONE", "SUCCESS"):
+            status_str = str(status)
+            if "DONE" in status_str or "SUCCESS" in status_str:
+                elapsed = time.perf_counter() - start_wait
+                print(f"[MX-TRANSFER] Transfer COMPLETE: {status_str} in {elapsed:.3f}s, "
+                      f"{total_bytes/1e9:.2f} GB", file=sys.stderr, flush=True)
                 self._agent.release_xfer_handle(handle)
                 break
-            if status in ("ERR", "ERROR", "FAIL"):
+            if any(x in status_str for x in ("ERR", "ERROR", "FAIL", "DISCONNECT")):
+                elapsed = time.perf_counter() - start_wait
+                print(f"[MX-TRANSFER] Transfer FAILED: {status_str} after {elapsed:.3f}s",
+                      file=sys.stderr, flush=True)
                 self._agent.release_xfer_handle(handle)
                 raise RuntimeError(f"Transfer failed with status {status}")
             time.sleep(0.001)

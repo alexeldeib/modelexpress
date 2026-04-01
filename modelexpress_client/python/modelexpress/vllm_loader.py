@@ -698,22 +698,25 @@ class MxModelLoader(BaseModelLoader):
         # Create dummy weights as receive buffers
         self._dummy_loader.load_weights(model, model_config)
 
-        # Process dummy weights to establish final tensor layout.
+        # Process dummy weights to establish the same tensor layout as source.
+        # For quantized models, this creates the same set of post-processed
+        # tensors (swizzled weights, collapsed scales, etc.) as the source.
+        # The VALUES will be wrong (computed from dummy data) but the NAMES
+        # and SHAPES match, allowing RDMA to overwrite with correct data.
         process_weights_after_loading(model, model_config, target_device)
 
         # RDMA receive overwrites ALL tensor data with real values from source.
         self._receive_from_peer(model, global_rank, device_id, source_worker)
 
-        # Verify transfer integrity for first 3 tensors (debug)
-        if model_config.quantization:
-            import sys, hashlib
-            tensors = _collect_module_tensors(model)
-            sample = list(tensors.items())[:3]
-            for name, t in sample:
-                data = t.cpu().contiguous().numpy().tobytes()
-                h = hashlib.md5(data).hexdigest()[:12]
-                print(f"[MX-VERIFY] {name}: shape={t.shape} dtype={t.dtype} md5={h}",
-                      file=sys.stderr, flush=True)
+        # For quantized models, re-run post-processing on RDMA-received data.
+        # The first process_weights_after_loading() established tensor layout
+        # from dummy data. RDMA transferred the source's post-processed VALUES.
+        # But process_weights_after_loading is NOT idempotent for FP4 — calling
+        # it on already-swizzled data would double-swizzle. So we DON'T re-run.
+        #
+        # Instead, we rely on the fact that RDMA transferred the exact same
+        # tensor VALUES that the source uses for inference. If inference is
+        # wrong, the issue is in how the tensors map to the model graph.
 
         # Publish metadata so future nodes can discover us
         self._publish_metadata(global_rank, device_id, identity)
