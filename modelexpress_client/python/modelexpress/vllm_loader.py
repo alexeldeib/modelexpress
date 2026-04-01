@@ -704,6 +704,17 @@ class MxModelLoader(BaseModelLoader):
         # RDMA receive overwrites ALL tensor data with real values from source.
         self._receive_from_peer(model, global_rank, device_id, source_worker)
 
+        # Verify transfer integrity for first 3 tensors (debug)
+        if model_config.quantization:
+            import sys, hashlib
+            tensors = _collect_module_tensors(model)
+            sample = list(tensors.items())[:3]
+            for name, t in sample:
+                data = t.cpu().contiguous().numpy().tobytes()
+                h = hashlib.md5(data).hexdigest()[:12]
+                print(f"[MX-VERIFY] {name}: shape={t.shape} dtype={t.dtype} md5={h}",
+                      file=sys.stderr, flush=True)
+
         # Publish metadata so future nodes can discover us
         self._publish_metadata(global_rank, device_id, identity)
 
@@ -800,9 +811,18 @@ class MxModelLoader(BaseModelLoader):
             logger.info(f"[Worker {device_id}] Weights loaded from disk")
 
         # Always process weights first, then register the final tensors.
-        # For quantized models (FP4/FP8), this produces swizzled/repacked
-        # weights and computed scales from real data.
         process_weights_after_loading(model, model_config, target_device)
+
+        # Checksum first 3 tensors for transfer verification (debug)
+        if model_config.quantization:
+            import sys, hashlib
+            tensors = _collect_module_tensors(model)
+            sample = list(tensors.items())[:3]
+            for name, t in sample:
+                data = t.cpu().contiguous().numpy().tobytes()
+                h = hashlib.md5(data).hexdigest()[:12]
+                print(f"[MX-SOURCE-VERIFY] {name}: shape={t.shape} dtype={t.dtype} md5={h}",
+                      file=sys.stderr, flush=True)
 
         self._register_tensors(model, global_rank, device_id)
         self._publish_metadata(global_rank, device_id, identity)
