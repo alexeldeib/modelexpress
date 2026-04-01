@@ -708,6 +708,20 @@ class MxModelLoader(BaseModelLoader):
         # RDMA receive overwrites ALL tensor data with real values from source.
         self._receive_from_peer(model, global_rank, device_id, source_worker)
 
+        # After RDMA, clone any parameters with aliased storage to avoid
+        # "more than one element refers to a single memory location" errors.
+        # process_weights_after_loading() on dummy data can create parameters
+        # that share underlying storage (e.g., Parameter(layer.weight.data)).
+        # RDMA overwrites the storage, but PyTorch still tracks the aliasing.
+        for name, module in model.named_modules():
+            for param_name, param in module._parameters.items():
+                if param is not None and param.is_cuda:
+                    # Check if this parameter's storage is shared
+                    if param.storage_offset() != 0 or param.storage().size() != param.nelement() * param.element_size():
+                        module._parameters[param_name] = torch.nn.Parameter(
+                            param.data.clone(), requires_grad=param.requires_grad
+                        )
+
         # Fingerprint after RDMA for comparison with source (debug)
         if model_config.quantization:
             import sys
