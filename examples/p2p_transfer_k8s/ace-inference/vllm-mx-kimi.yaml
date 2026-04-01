@@ -151,12 +151,12 @@ spec:
             requests:
               nvidia.com/gpu: "4"
               rdma/ib: "1"
-              memory: "800Gi"
-              cpu: "70"
+              memory: "256Gi"
+              cpu: "40"
             limits:
               nvidia.com/gpu: "4"
               rdma/ib: "1"
-              memory: "800Gi"
+              memory: "256Gi"
           startupProbe:
             httpGet:
               path: /health
