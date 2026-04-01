@@ -712,9 +712,13 @@ class MxModelLoader(BaseModelLoader):
         if model_config.quantization:
             import sys
             tensors = _collect_module_tensors(model)
-            for name, t in list(tensors.items())[:3]:
+            items = list(tensors.items())
+            for idx in [0, 100, 200]:
+                if idx >= len(items):
+                    break
+                name, t = items[idx]
                 s = t.view(-1)[:min(8, t.numel())].float()
-                print(f"[MX-DST] {name}: {t.shape} {t.dtype} first8={s.tolist()} ptr={hex(t.data_ptr())}",
+                print(f"[MX-DST] [{idx}] {name}: {t.shape} {t.dtype} first8={s.tolist()}",
                       file=sys.stderr, flush=True)
 
         # Publish metadata so future nodes can discover us
@@ -819,9 +823,13 @@ class MxModelLoader(BaseModelLoader):
         if model_config.quantization:
             import sys
             tensors = _collect_module_tensors(model)
-            for name, t in list(tensors.items())[:3]:
+            items = list(tensors.items())
+            for idx in [0, 100, 200]:
+                if idx >= len(items):
+                    break
+                name, t = items[idx]
                 s = t.view(-1)[:min(8, t.numel())].float()
-                print(f"[MX-SRC] {name}: {t.shape} {t.dtype} first8={s.tolist()} ptr={hex(t.data_ptr())}",
+                print(f"[MX-SRC] [{idx}] {name}: {t.shape} {t.dtype} first8={s.tolist()}",
                       file=sys.stderr, flush=True)
 
         self._register_tensors(model, global_rank, device_id)
